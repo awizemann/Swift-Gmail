@@ -15,3 +15,8 @@ reviewed_by: audit:claude-haiku-4-5
 ## Observations
 - [origin] Transport layer of Assistant email client (poxt.com), lifted out as standalone package. Explains design priorities and feature set. #origin
 - [use_case] Built for mail clients syncing whole mailboxes, not single-message send. Batch operations, quota management, and lane prioritization reflect this focus. #use-case
+
+## Relations
+- relates_to [[swift-gmail/architecture/gmail-api-surface-batch-operations]]
+- relates_to [[swift-gmail/architecture/quota-rate-management]]
+- relates_to [[swift-gmail/architecture/stack-minimal-dependencies]]

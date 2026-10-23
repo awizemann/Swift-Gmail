@@ -15,3 +15,9 @@ reviewed_by: audit:claude-haiku-4-5
 ## Observations
 - [offline_testing] 110+ tests, none touching network. All logic verified locally (mocked responses, fixtures); enables deterministic, fast test runs and prevents test flakiness. #testing
 - [concurrency_testing] Swift 6 strict concurrency enforced throughout; tests verify concurrent behavior (quota lanes, batch resilience, token refresh) without network calls #concurrency #testing
+
+## Relations
+- validates [[swift-gmail/architecture/quota-rate-management]]
+- validates [[swift-gmail/architecture/token-management-pattern]]
+- validates [[swift-gmail/architecture/gmail-api-surface-batch-operations]]
+- enforces [[swift-gmail/architecture/stack-minimal-dependencies]]
