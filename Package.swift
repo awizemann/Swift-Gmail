@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 // SwiftGmail — a Gmail REST API client for Swift 6.
 //

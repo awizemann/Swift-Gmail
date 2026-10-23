@@ -92,12 +92,13 @@ let tokens = GmailTokenSource(
 
 ### Logging
 
-Loggers use the `SwiftGmail` subsystem. To fold them into your app's, set
-`GmailLogging.subsystem` once at launch, before the first client exists.
+Loggers use the `SwiftGmail` subsystem. To fold them into your app's, call
+`GmailLogging.configure(subsystem:)` once at launch, before the first client
+exists. A later call is ignored and logged as a fault.
 
 ## Requirements
 
-macOS 15, iOS 18, Swift 6.0.
+macOS 15, iOS 18, Swift 6.2.
 
 ## License
 

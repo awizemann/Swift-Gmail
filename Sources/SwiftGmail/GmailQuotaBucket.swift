@@ -50,19 +50,25 @@ import os
 /// source of truth for every metered call in `GmailAPIClient`.
 public struct GmailQuotaProfile: Sendable {
     /// The most ONE device paces a key at — the AIMD ceiling of its bucket.
-    let unitsPerSecond: Double
+    public let unitsPerSecond: Double
 
     /// Gmail's quota for the whole USER, which every device signed into the
     /// account spends against and none of them can see the others spend
     /// (t-a9825f81). Not a pacing input: `GmailQuotaBucket.bulkRateFraction`
     /// is sized against it, and the shared-budget tests model the server
     /// with it.
-    let perUserUnitsPerSecond: Double
+    public let perUserUnitsPerSecond: Double
 
     /// Every method's unit cost for this profile — the single source of truth
     /// for what a call debits. See `GmailUnitCost` for the documented table
     /// and its citation.
-    let unitCost: GmailUnitCost
+    public let unitCost: GmailUnitCost
+
+    public init(unitsPerSecond: Double, perUserUnitsPerSecond: Double, unitCost: GmailUnitCost) {
+        self.unitsPerSecond = unitsPerSecond
+        self.perUserUnitsPerSecond = perUserUnitsPerSecond
+        self.unitCost = unitCost
+    }
 
     /// The two per-object gets the batch envelopes price themselves off.
     /// Derived from `unitCost` so there is exactly one table.
@@ -72,7 +78,7 @@ public struct GmailQuotaProfile: Sendable {
     /// Pre-2026-05-01 projects — 15,000 units/minute.
     public static let legacy = GmailQuotaProfile(unitsPerSecond: 250, perUserUnitsPerSecond: 250, unitCost: .legacy)
 
-    /// Projects created on or after 2026-05-01 — the Poxt Cloud project
+    /// Projects created on or after 2026-05-01 — the project this was measured on
     /// (created 2026-09-11) is metered against this one.
     ///
     /// 50 units/second is the MEASURED ceiling, not the documented default:
@@ -80,8 +86,8 @@ public struct GmailQuotaProfile: Sendable {
     /// ≈ 2,500 units/min and 403'd in per-minute waves above it, i.e. an
     /// effective ~3,000 units/min / 50 u/s. The documented 100 u/s was twice
     /// the real budget and produced 159,080 per-part 403s in nine hours.
-    /// Refine to (console "Queries per minute per user" / 60) once Alan reads
-    /// the real figure off the Cloud console; the adaptive bucket below only
+    /// Refine to (console "Queries per minute per user" / 60) once the real
+    /// figure is read off the Cloud console; the adaptive bucket below only
     /// ever paces BELOW this number, so an over-estimate here costs throughput
     /// rather than correctness.
     ///
@@ -134,7 +140,7 @@ public enum GmailQuotaLane: Sendable, Hashable {
     /// BULK lane. Child tasks inherit it; `Task.detached` does not (by
     /// design — a detached ingest is not a fetch).
     /// `isolation: #isolation` so a caller that IS actor-isolated — the
-    /// `@MainActor` `SyncOrchestrator`, whose sliced listing runs on this lane
+    /// a `@MainActor` sync coordinator whose sliced listing runs on this lane
     /// — can pass a closure that stays in its own isolation domain instead of
     /// having to hand a `@Sendable` one across a boundary.
     /// `nonisolated(nonsending)`: see `GmailUnitCost.withKey`.

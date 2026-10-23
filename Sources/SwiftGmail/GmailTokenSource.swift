@@ -12,9 +12,8 @@
 //  and sent a `/batch` carrying a token that had expired hours earlier; every
 //  sub-response came back 401 and the batch path dropped them all. A source
 //  is asked RIGHT BEFORE each HTTP request instead (after the bucket's wait),
-//  so the existing refresh-if-near-expiry logic in
-//  `OAuth2Service.getValidToken` decides freshness at send time. The token
-//  cache is still the Keychain entry that method reads; nothing here caches.
+//  so the host's refresh-if-near-expiry logic decides freshness at send
+//  time. The host's token store is the only cache; nothing here caches.
 //
 
 import Foundation
@@ -63,11 +62,15 @@ public struct GmailTokenSource: Sendable {
         GmailTokenSource(fixed: token)
     }
 
-    func current() async throws -> String {
+    /// The token for the next request (refreshed by the host only if it is
+    /// near expiry).
+    public func current() async throws -> String {
         try await resolve(nil)
     }
 
-    func refreshed(rejecting token: String) async throws -> String {
+    /// Gmail answered 401 to `token`: a newer one, or a throw if the host
+    /// cannot refresh.
+    public func refreshed(rejecting token: String) async throws -> String {
         try await resolve(token)
     }
 }
@@ -76,11 +79,10 @@ public struct GmailTokenSource: Sendable {
 ///
 /// A stale token fails every chunk in flight at once; without the gate each
 /// would refresh on its own. The first 401 starts the refresh, later ones
-/// await the same task, and a refresh that THROWS (a revoked refresh token —
-/// `OAuth2Service.refreshToken`'s credential-shaped `authenticationFailed`)
-/// propagates to every chunk that asked, which is how the codebase already
-/// surfaces a dead grant. (Across calls and accounts the refresh is
-/// single-flighted again, per mailbox, inside `OAuth2Service`.)
+/// await the same task, and a refresh that THROWS (a revoked refresh token,
+/// surfaced by the host's token source as its own credential error)
+/// propagates to every chunk that asked. (Across calls and accounts the host
+/// is expected to single-flight the refresh per mailbox as well.)
 ///
 /// Every wait here ABANDONS on cancellation (`awaitAbandoningOnCancel`): the
 /// shared refresh is unstructured, and a cancelled pass — the iOS
@@ -95,7 +97,9 @@ actor GmailTokenRefreshGate {
 
     /// The token for the next request. Waits out a refresh another chunk has
     /// in flight so this one does not go out with the token being replaced.
-    func current() async throws -> String {
+    /// The token for the next request (refreshed by the host only if it is
+    /// near expiry).
+    public func current() async throws -> String {
         if let refresh { _ = try? await awaitAbandoningOnCancel(refresh) }
         try Task.checkCancellation()
         return try await source.current()
@@ -110,7 +114,7 @@ actor GmailTokenRefreshGate {
     /// landed, or with a token since replaced again) does not get a blind
     /// re-send: it asks the source about ITS token — which hands back the
     /// stored replacement, or refreshes if the store still holds the rejected
-    /// one (`OAuth2Service.refreshedToken(rejecting:)`, single-flighted per
+    /// one (the host's `rejected != nil` path, single-flighted per
     /// mailbox) — and re-sends only if that yields something new.
     func refreshOnce(rejecting token: String) async throws -> Bool {
         guard source.canRefresh else { return false }

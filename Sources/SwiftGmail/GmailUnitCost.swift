@@ -57,7 +57,7 @@ import Foundation
 ///
 /// The same page gives the per-user ceiling as **6,000 units/minute/user**
 /// (= 100 u/s). `GmailQuotaProfile.current.unitsPerSecond` is deliberately
-/// 50, the MEASURED ceiling on the Poxt Cloud project — see the note there.
+/// 50, the MEASURED ceiling on the project this was tuned against — see the note there.
 public struct GmailUnitCost: Sendable {
     public let getProfile: Int
     public let labelsList: Int
@@ -130,7 +130,7 @@ public struct GmailUnitCost: Sendable {
 /// Which account the CURRENT task tree's Gmail calls are metered against.
 ///
 /// Every metered client method takes an explicit `quotaKey`, and the paths
-/// that know their account (the whole of `GmailFetchProvider`, the sync
+/// that know their account (a host's fetch provider, the sync
 /// orchestrator's cursor stamp) pass it. This task local exists for the one
 /// family that cannot: `GmailActionApplier` is a deliberately narrow protocol
 /// — `modify(accessToken:messageId:…)`, no account — with a dozen test fakes

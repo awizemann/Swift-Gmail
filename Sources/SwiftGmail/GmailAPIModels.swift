@@ -3,8 +3,6 @@
 //  SwiftGmail
 //
 //  Codable response models and supporting types for the Gmail REST API.
-//  Lifted verbatim from Threader; access modifiers raised to `public`
-//  for cross-module use. No behavioral changes.
 //
 
 import Foundation

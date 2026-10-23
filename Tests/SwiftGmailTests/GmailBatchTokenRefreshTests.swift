@@ -31,7 +31,7 @@ struct GmailBatchTokenRefreshTests {
     // MARK: - Token source fake
 
     /// Hands out `stale` until refreshed, then `fresh`. Counts refreshes.
-    /// Like `OAuth2Service.refreshedToken(rejecting:)`, a rejection of a token
+    /// Like a real token store, a rejection of a token
     /// that is no longer current hands back the current one without
     /// refreshing again.
     final class FakeTokens: Sendable {

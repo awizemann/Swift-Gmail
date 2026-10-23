@@ -33,8 +33,8 @@ private let batchEndpoint = "https://gmail.googleapis.com/batch/gmail/v1"
 /// turns into a minute-long stall (and, on iOS, into a background-time kill).
 /// The ids that are still failing after one round are REPORTED to the caller
 /// in `BatchFetchOutcome.leftover` — never swallowed. Quick sync owes
-/// them to later passes in `QuickSyncPendingStore` (its page cursor steps over
-/// them — `GmailPagedQuickSync`); full sync MUST drain them before it records anything complete, because
+/// them to later passes (an incremental sync's page cursor steps over
+/// them); a full sync MUST drain them before it records anything complete, because
 /// nothing else would ever ask for them again (t-8b089caa).
 private let maxPartRetryRounds = 1
 
@@ -540,7 +540,7 @@ extension GmailAPIClient {
                             // Token resolved per id, and a 401 refreshed once
                             // and re-sent — the batch path's contract, one id
                             // at a time (the refresh itself is single-flighted
-                            // per mailbox in `OAuth2Service`).
+                            // per mailbox by the host's token source).
                             return .message(try await self.getMessage(
                                 tokenSource: tokenSource, messageId: id, format: format, quotaKey: quotaKey
                             ))

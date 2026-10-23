@@ -3,8 +3,7 @@
 //  GmailAPIClient.swift
 //  SwiftGmail
 //
-//  Gmail REST API client. Pure HTTP — no SwiftData, no AppKit/UIKit.
-//  Lifted from Threader; namespace + access modifiers adapted.
+//  Gmail REST API client. Pure HTTP — no persistence, no AppKit/UIKit.
 //
 
 import Foundation
@@ -886,7 +885,8 @@ public final class GmailAPIClient: Sendable {
 
     // MARK: - Send / Drafts
 
-    /// Build a base64url-encoded RFC 2822 message. Delegates to `RFC2822MessageBuilder`.
+    /// Send `rawMessage` — a base64url-encoded RFC 2822 message the caller
+    /// built. 100 units; never retried on a client-side timeout.
     @discardableResult
     public func sendMessage(
         accessToken: String,

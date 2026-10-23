@@ -90,8 +90,9 @@ public struct UserDefaultsGmailQuotaStateStore: GmailQuotaStateStore, @unchecked
     /// default key. Past this, the keys whose state changed longest ago go.
     static let maxKeys = 16
 
-    // UserDefaults is documented thread-safe; `@unchecked` covers SDKs that
-    // have not annotated it yet.
+    // `UserDefaults` is documented thread-safe but the SDK does not mark it
+    // Sendable (verified on the macOS 15 / Xcode 27 SDK), so the conformance
+    // is unchecked. The only other stored property is a `String`.
     private let defaults: UserDefaults
     private let key: String
 

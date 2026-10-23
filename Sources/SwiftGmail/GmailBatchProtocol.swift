@@ -105,7 +105,7 @@ public enum GmailBatchProtocol {
 
     /// A boundary that cannot occur inside a JSON body or a header.
     static func makeBoundary() -> String {
-        "batch_poxt_\(UUID().uuidString)"
+        "batch_swiftgmail_\(UUID().uuidString)"
     }
 
     static func contentId(forIndex index: Int) -> String {
