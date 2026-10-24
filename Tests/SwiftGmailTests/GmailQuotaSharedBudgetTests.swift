@@ -96,12 +96,13 @@ struct GmailQuotaSharedBudgetTests {
     /// part), all devices phase-aligned at t0 (the worst case), and only small
     /// quick syncs on the interactive lane.
     private static func envelopeUnits(_ format: MessageFormat) -> Int {
-        let cost = GmailQuotaProfile.active.messagesGetCost
-        return GmailBatchProtocol.maxOperations(for: format, unitCost: cost, lane: .bulk) * cost
+        let cost = GmailQuotaProfile.current.messagesGetCost
+        return GmailBatchProtocol.maxOperations(for: format, unitCost: cost, lane: .bulk,
+            bulkEnvelopeUnits: GmailQuotaBucket.bulkEnvelopeUnits(for: .current)) * cost
     }
     /// A quick sync that finds three new messages: `history.list` + 3 gets.
-    private static let quickSyncUnits = GmailQuotaProfile.active.unitCost.historyList
-        + 3 * GmailQuotaProfile.active.messagesGetCost
+    private static let quickSyncUnits = GmailQuotaProfile.current.unitCost.historyList
+        + 3 * GmailQuotaProfile.current.messagesGetCost
     /// Round trip before a device learns whether the server took a request.
     private static let latency: TimeInterval = 1
     /// A rejected quick sync tries again after the batch layer's part-retry
@@ -121,7 +122,7 @@ struct GmailQuotaSharedBudgetTests {
         let clock = SimClock()
         let key = "alan@example.com"
         let buckets = (0..<devices).map { _ in clock.bucket(policy: policy) }
-        var server = PerUserServer(unitsPerMinute: Int(GmailQuotaProfile.active.perUserUnitsPerSecond * 60))
+        var server = PerUserServer(unitsPerMinute: Int(GmailQuotaProfile.current.perUserUnitsPerSecond * 60))
         let units = envelopeUnits(format)
         var actors = (0..<devices).map {
             SimActor(device: $0, lane: .bulk, units: units, period: nil, next: clock.now)
@@ -202,7 +203,7 @@ struct GmailQuotaSharedBudgetTests {
     private static let settle: TimeInterval = 120
 
     private static var contendedShare: Double {
-        GmailQuotaProfile.active.unitsPerSecond * GmailQuotaBucket.contendedBulkRateFraction
+        GmailQuotaProfile.current.unitsPerSecond * GmailQuotaBucket.contendedBulkRateFraction
     }
 
     @Test("Three devices backfilling at once collide once, then share the budget with no further signals for the hold", arguments: [MessageFormat.full, .metadata])
@@ -223,7 +224,7 @@ struct GmailQuotaSharedBudgetTests {
             #expect(rate >= 0.8 * Self.contendedShare, "device \(device) crawled at \(rate) u/s")
         }
         let total = Double(outcome.bulkUnits.reduce(0, +)) / duration
-        #expect(total <= GmailQuotaProfile.active.perUserUnitsPerSecond)
+        #expect(total <= GmailQuotaProfile.current.perUserUnitsPerSecond)
     }
 
     @Test("After the first collision, a quick sync beside three backfilling devices is never parked", arguments: [MessageFormat.full, .metadata])
@@ -236,7 +237,7 @@ struct GmailQuotaSharedBudgetTests {
         // Its own reservation at the full rate, nothing more. At 0.8 without
         // the contended share, AIMD re-probes into the wall every few minutes
         // and parks a quick sync for up to a minute each time.
-        let ownDuration = Double(Self.quickSyncUnits) / GmailQuotaProfile.active.unitsPerSecond
+        let ownDuration = Double(Self.quickSyncUnits) / GmailQuotaProfile.current.unitsPerSecond
         let slow = settled.filter { $0.latency > ownDuration + 0.001 }
         #expect(slow.isEmpty, "quick syncs parked after settling: \(slow.map { "\(Int($0.at))s waited \(Int($0.latency))s" })")
     }
@@ -245,7 +246,7 @@ struct GmailQuotaSharedBudgetTests {
     func singleDeviceGetsItsWholeShare(format: MessageFormat) async {
         let duration: TimeInterval = 60 * 60
         let outcome = await Self.simulate(devices: 1, duration: duration, format: format, quickSyncPeriod: 45)
-        let share = GmailQuotaProfile.active.unitsPerSecond * GmailQuotaBucket.bulkRateFraction
+        let share = GmailQuotaProfile.current.unitsPerSecond * GmailQuotaBucket.bulkRateFraction
         #expect(outcome.signalTimes.isEmpty)
         // A quick sync every 45 s is charged to the bulk clock, hence 0.9.
         #expect(Double(outcome.bulkUnits[0]) / duration >= 0.9 * share)
@@ -254,13 +255,13 @@ struct GmailQuotaSharedBudgetTests {
 
     @Test("The contended share fits three devices with headroom; the uncontended one does not need to")
     func bulkShareArithmetic() {
-        let budget = GmailQuotaProfile.active.perUserUnitsPerSecond
+        let budget = GmailQuotaProfile.current.perUserUnitsPerSecond
         let devices = Double(GmailQuotaBucket.concurrentBulkDevices)
         #expect(devices * Self.contendedShare <= 0.9 * budget,
                 "\(devices) × \(Self.contendedShare) u/s leaves under 10% of \(budget) u/s for quick syncs")
-        let alone = GmailQuotaProfile.active.unitsPerSecond * GmailQuotaBucket.bulkRateFraction
+        let alone = GmailQuotaProfile.current.unitsPerSecond * GmailQuotaBucket.bulkRateFraction
         #expect(alone > Self.contendedShare, "the lone device must not pay for contention it does not have")
-        #expect(alone <= 0.9 * GmailQuotaProfile.active.unitsPerSecond, "interactive keeps headroom on its own device")
+        #expect(alone <= 0.9 * GmailQuotaProfile.current.unitsPerSecond, "interactive keeps headroom on its own device")
     }
 
     // MARK: - Policy comparison (t-a9825f81: A/B/C asked for, D variants added; D2h ships)
@@ -287,7 +288,7 @@ struct GmailQuotaSharedBudgetTests {
     @Test("Policy comparison report — prints the A/B/C table; asserts only that each ran")
     func policyComparisonReport() async {
         let duration: TimeInterval = 3 * 60 * 60
-        let cost = Double(GmailQuotaProfile.active.messagesGetCost)
+        let cost = Double(GmailQuotaProfile.current.messagesGetCost)
         for (name, policy) in Self.candidates {
             for format in [MessageFormat.full, .metadata] {
                 for devices in [1, 3] {

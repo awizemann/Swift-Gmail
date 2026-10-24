@@ -29,7 +29,7 @@ struct GmailQuotaBucketPersistenceTests {
         func save(_ state: [String: GmailQuotaPersistedKey]) { lock.withLock { self.state = state } }
     }
 
-    private static let ceiling = GmailQuotaProfile.active.unitsPerSecond
+    private static let ceiling = GmailQuotaProfile.current.unitsPerSecond
     private static let units = 100
 
     /// One bulk reservation's duration on `bucket` — the step between two
@@ -199,7 +199,7 @@ struct GmailQuotaBucketInteractivePriorityTests {
         }
     }
 
-    private static let unitCost = GmailQuotaProfile.active.messagesGetCost
+    private static let unitCost = GmailQuotaProfile.current.messagesGetCost
 
     @Test("Bulk waits while an interactive request is pending, then proceeds")
     func bulkYieldsToPendingInteractive() async throws {
@@ -317,7 +317,7 @@ struct GmailQuotaBucketInteractivePriorityTests {
         let key = "priority-repace"
         // 12 units at the bulk rate (50 × 0.8 = 40 u/s) = 0.3 s apart.
         let units = 12
-        let spacing = Double(units) / (GmailQuotaProfile.active.unitsPerSecond * GmailQuotaBucket.bulkRateFraction)
+        let spacing = Double(units) / (GmailQuotaProfile.current.unitsPerSecond * GmailQuotaBucket.bulkRateFraction)
 
         await bucket.beginInteractive(key: key)
         let origin = Date()
@@ -363,7 +363,7 @@ struct GmailQuotaBucketPersistedStateTests {
         func save(_ state: [String: GmailQuotaPersistedKey]) { lock.withLock { self.state = state } }
     }
 
-    private static let ceiling = GmailQuotaProfile.active.unitsPerSecond
+    private static let ceiling = GmailQuotaProfile.current.unitsPerSecond
     private static let step = GmailQuotaBucket.recoveryFraction * ceiling
 
     private static func laneStep(_ bucket: GmailQuotaBucket, key: String, lane: GmailQuotaLane, units: Int = 100) async -> TimeInterval {
@@ -451,7 +451,7 @@ struct GmailAPIClientSendQuotaTests {
         await #expect(throws: (any Error).self) {
             _ = try await client.getProfile(accessToken: "t", quotaKey: "single-429")
         }
-        #expect(await bucket.rate(for: "single-429") == GmailQuotaProfile.active.unitsPerSecond / 2)
+        #expect(await bucket.rate(for: "single-429") == GmailQuotaProfile.current.unitsPerSecond / 2)
     }
 
     @Test("A single-call rate-reason 403 feeds the bucket; a refusal 403 does not")
@@ -467,8 +467,8 @@ struct GmailAPIClientSendQuotaTests {
         await #expect(throws: (any Error).self) {
             _ = try await refusalClient.listMessages(accessToken: "t", query: "x", quotaKey: "refusal-403")
         }
-        #expect(await bucket.rate(for: "single-403") == GmailQuotaProfile.active.unitsPerSecond / 2)
-        #expect(await bucket.rate(for: "refusal-403") == GmailQuotaProfile.active.unitsPerSecond)
+        #expect(await bucket.rate(for: "single-403") == GmailQuotaProfile.current.unitsPerSecond / 2)
+        #expect(await bucket.rate(for: "refusal-403") == GmailQuotaProfile.current.unitsPerSecond)
     }
 
     @Test("A bulk consumer waits for an interactive request that is still on the wire")

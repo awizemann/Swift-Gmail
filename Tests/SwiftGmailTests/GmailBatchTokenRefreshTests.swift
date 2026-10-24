@@ -132,7 +132,7 @@ struct GmailBatchTokenRefreshTests {
             resource: "messages",
             ids: ids,
             format: .metadata,
-            unitCost: GmailQuotaProfile.active.messagesGetCost,
+            unitCost: GmailQuotaProfile.current.messagesGetCost,
             quotaKey: quotaKey,
             retryDelay: 0,
             as: GmailMessage.self
@@ -334,7 +334,7 @@ struct GmailBatchTokenRefreshTests {
 
         // The first debit starts at "now" and waits nothing; only a SECOND
         // debit queues behind it and makes the (virtual) clock move.
-        let oneSend = Double(GmailAPIClient.unitCost.historyList) / GmailQuotaProfile.active.unitsPerSecond
+        let oneSend = Double(GmailQuotaProfile.current.unitCost.historyList) / GmailQuotaProfile.current.unitsPerSecond
         #expect(abs(clock.elapsed - oneSend) < 0.001, "the re-send paid for its own reservation")
     }
 

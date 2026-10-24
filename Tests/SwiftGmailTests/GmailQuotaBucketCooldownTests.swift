@@ -51,7 +51,7 @@ struct GmailQuotaBucketCooldownTests {
         await bucket.beginInteractive(key: key)
         // A chain already pushed far ahead — earlier waiters of a long burst.
         for _ in 0..<5 {
-            _ = await bucket.bulkReleaseDelay(units: GmailQuotaBucket.bulkEnvelopeUnits, key: key, within: .infinity)
+            _ = await bucket.bulkReleaseDelay(units: bucket.bulkEnvelopeUnits, key: key, within: .infinity)
         }
         let ended = OSAllocatedUnfairLock(initialState: false)
         clock.onSleep { [clock] in
@@ -60,7 +60,7 @@ struct GmailQuotaBucketCooldownTests {
         }
 
         let start = clock.elapsed
-        try await bucket.consume(units: GmailQuotaBucket.bulkEnvelopeUnits, key: key, lane: .bulk)
+        try await bucket.consume(units: bucket.bulkEnvelopeUnits, key: key, lane: .bulk)
         let waited = clock.elapsed - start
 
         #expect(waited >= 2, "bulk did not yield")

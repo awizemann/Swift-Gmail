@@ -23,8 +23,8 @@ struct GmailQuotaBucketLaneTests {
         }
     }
 
-    private static let unitCost = GmailQuotaProfile.active.messagesGetCost
-    private static let rate = GmailQuotaProfile.active.unitsPerSecond
+    private static let unitCost = GmailQuotaProfile.current.messagesGetCost
+    private static let rate = GmailQuotaProfile.current.unitsPerSecond
 
     @Test("An interactive reservation never waits behind a long bulk queue")
     func interactiveJumpsTheBulkQueue() async throws {

@@ -145,7 +145,7 @@ struct GmailAPIClientBatchTests {
             resource: "messages",
             ids: ids,
             format: .metadata,
-            unitCost: GmailQuotaProfile.active.messagesGetCost,
+            unitCost: GmailQuotaProfile.current.messagesGetCost,
             quotaKey: quotaKey,
             retryDelay: 0,             // the real 5s backoff is not under test
             as: GmailMessage.self
@@ -322,10 +322,10 @@ struct GmailAPIClientBatchTests {
         _ = try await GmailQuotaLane.withBulkLane {
             try await Self.outcome(ids: ids, quotaKey: "lane-width-bulk")
         }
-        let perEnvelope = GmailQuotaBucket.bulkEnvelopeUnits / GmailQuotaProfile.active.messagesGetCost
+        let perEnvelope = GmailQuotaBucket.bulkEnvelopeUnits(for: .current) / GmailQuotaProfile.current.messagesGetCost
         let expected = (width + perEnvelope - 1) / perEnvelope
         #expect(BatchStubURLProtocol.requestedURLs.count == expected,
-                "bulk: 1,000-unit metadata envelopes split into \(expected) of at most \(GmailQuotaBucket.bulkEnvelopeUnits) units")
+                "bulk: 1,000-unit metadata envelopes split into \(expected) of at most \(GmailQuotaBucket.bulkEnvelopeUnits(for: .current)) units")
     }
 
     // MARK: - Envelope rejection → per-id fallback
@@ -368,7 +368,7 @@ struct GmailQuotaBucketTests {
     @Test("Successive reservations for one account draw from the SAME balance")
     func successiveCallsShareTheBudget() async throws {
         let bucket = GmailQuotaBucket()
-        let profile = GmailQuotaProfile.active
+        let profile = GmailQuotaProfile.current
         // A full second of budget is free (the burst), everything after it is paced.
         let units = Int(profile.unitsPerSecond)
 
@@ -384,7 +384,7 @@ struct GmailQuotaBucketTests {
     @Test("Accounts are metered independently — Gmail's ceiling is per user")
     func bucketsAreKeyedPerAccount() async throws {
         let bucket = GmailQuotaBucket()
-        let units = Int(GmailQuotaProfile.active.unitsPerSecond) * 3
+        let units = Int(GmailQuotaProfile.current.unitsPerSecond) * 3
 
         _ = await bucket.reserve(units: units, key: "account-a")
         let other = await bucket.reserve(units: 5, key: "account-b")
@@ -397,8 +397,8 @@ struct GmailQuotaBucketTests {
         // 50, not the documented 100: the project 403'd in per-minute waves
         // above ~3,000 units/min (t-172bfc74). Raise this only from the Cloud
         // console's real "Queries per minute per user" / 60.
-        #expect(GmailQuotaProfile.active.unitsPerSecond == 50)
-        #expect(GmailQuotaProfile.active.messagesGetCost == 20)
-        #expect(GmailQuotaProfile.active.threadsGetCost == 40)
+        #expect(GmailQuotaProfile.current.unitsPerSecond == 50)
+        #expect(GmailQuotaProfile.current.messagesGetCost == 20)
+        #expect(GmailQuotaProfile.current.threadsGetCost == 40)
     }
 }

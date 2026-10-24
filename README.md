@@ -75,6 +75,37 @@ Wrap backfill work in `GmailQuotaLane.withBulkLane { ... }`. Everything else
 runs on the interactive lane, which is paced ahead of bulk and never parked
 behind a backfill's cooldown.
 
+### Quota
+
+Every client debits a `GmailQuotaBucket`, which paces calls against a
+`GmailQuotaProfile`: the per-device rate ceiling plus the unit cost of each
+method. `.current` (the default) is for Cloud projects created on or after
+2026-05-01; `.legacy` is for older ones. A bucket you build yourself takes the
+profile directly:
+
+```swift
+let client = GmailAPIClient(quotaBucket: GmailQuotaBucket(profile: .legacy))
+```
+
+`GmailAPIClient()` uses the process-wide `GmailQuotaBucket.shared`. It is
+memory-only by default, so nothing is written to disk unless you ask. To pick
+its profile or persist its backoff state across launches, call
+`configureShared` once at launch, before the first client exists:
+
+```swift
+GmailQuotaBucket.configureShared(
+    profile: .current,
+    stateStore: UserDefaultsGmailQuotaStateStore()
+)
+```
+
+A second call, or one after `shared` was first used, is ignored and logged as
+a fault.
+
+The package no longer detects test processes. If your app makes this call
+with the UserDefaults store at launch, your own test target will write to
+`UserDefaults.standard` too, so skip the call when running under tests.
+
 ### Credential errors
 
 If your token source throws its own error type for a dead credential, tell the
@@ -95,6 +126,17 @@ let tokens = GmailTokenSource(
 Loggers use the `SwiftGmail` subsystem. To fold them into your app's, call
 `GmailLogging.configure(subsystem:)` once at launch, before the first client
 exists. A later call is ignored and logged as a fault.
+
+## Upgrading from 0.1.0
+
+`GmailQuotaBucket.shared` no longer persists to `UserDefaults` on its own, and
+`GmailQuotaProfile.active` is gone (use `.current`, or the bucket's
+`profile`). An app that relied on the old persistence, such as an
+Assistant-style mail app, calls this at launch to keep it:
+
+```swift
+GmailQuotaBucket.configureShared(stateStore: UserDefaultsGmailQuotaStateStore())
+```
 
 ## Requirements
 

@@ -49,7 +49,7 @@ public final class GmailAPIClient: Sendable {
     /// the reservation, on the lane the current task tree belongs to.
     ///
     /// Every network method in this client calls this before its request goes
-    /// out. `units` is read off `GmailQuotaProfile.active.unitCost`, never
+    /// out. `units` is read off `quotaBucket.profile.unitCost`, never
     /// hard-coded at the call site — one table, cited once
     /// (`GmailUnitCost.documented`).
     ///
@@ -63,8 +63,8 @@ public final class GmailAPIClient: Sendable {
         try await quotaBucket.consume(units: units, key: key, parkable: parkable)
     }
 
-    /// The unit-cost table this build meters against.
-    static var unitCost: GmailUnitCost { GmailQuotaProfile.active.unitCost }
+    /// The unit-cost table this client meters against — its bucket's profile.
+    var unitCost: GmailUnitCost { quotaBucket.profile.unitCost }
 
     // MARK: - URL Helpers
 
@@ -111,7 +111,7 @@ public final class GmailAPIClient: Sendable {
         includeSpamTrash: Bool = false,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> ListMessagesResponse {
-        try await meter(Self.unitCost.messagesList, key: quotaKey)
+        try await meter(self.unitCost.messagesList, key: quotaKey)
         // `includeSpamTrash` defaults to FALSE server-side, and that filter is
         // applied to the RESULTS — an `in:spam` query without it comes back
         // empty. Only full sync's spam listing asks for it.
@@ -163,7 +163,7 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> ListDraftsResponse {
-        try await meter(Self.unitCost.draftsList, key: quotaKey)
+        try await meter(self.unitCost.draftsList, key: quotaKey)
         var queryItems = [URLQueryItem(name: "maxResults", value: String(maxResults))]
         if let pageToken = pageToken {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
@@ -193,7 +193,7 @@ public final class GmailAPIClient: Sendable {
         accessToken: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailProfile {
-        try await meter(Self.unitCost.getProfile, key: quotaKey)
+        try await meter(self.unitCost.getProfile, key: quotaKey)
         let url = try simpleURL("\(baseURL)/profile")
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -213,7 +213,7 @@ public final class GmailAPIClient: Sendable {
         accessToken: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> [GmailLabel] {
-        try await meter(Self.unitCost.labelsList, key: quotaKey)
+        try await meter(self.unitCost.labelsList, key: quotaKey)
         let url = try simpleURL("\(baseURL)/labels")
 
         var request = URLRequest(url: url)
@@ -243,7 +243,7 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> HistoryListResponse {
-        try await meter(Self.unitCost.historyList, key: quotaKey)
+        try await meter(self.unitCost.historyList, key: quotaKey)
         return try await historyRequest(
             accessToken: accessToken, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
             quotaKey: quotaKey
@@ -265,7 +265,7 @@ public final class GmailAPIClient: Sendable {
     ) async throws -> HistoryListResponse {
         try await withTokenSource(tokenSource, meter: {
             // Every send is metered — the 401 re-send included.
-            try await self.meter(Self.unitCost.historyList, key: quotaKey)
+            try await self.meter(self.unitCost.historyList, key: quotaKey)
         }) { token in
             try await historyRequest(
                 accessToken: token, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
@@ -332,7 +332,7 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> ListThreadsResponse {
-        try await meter(Self.unitCost.threadsList, key: quotaKey)
+        try await meter(self.unitCost.threadsList, key: quotaKey)
         var queryItems = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "maxResults", value: String(maxResults)),
@@ -368,7 +368,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailThread {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.threadsGet, key: quotaKey)
+            try await self.meter(self.unitCost.threadsGet, key: quotaKey)
             return try await self.threadRequest(accessToken: accessToken, threadId: threadId, format: format, quotaKey: quotaKey)
         }
     }
@@ -384,7 +384,7 @@ public final class GmailAPIClient: Sendable {
     ) async throws -> GmailThread {
         try await withRetry(maxRetries: 3) {
             try await self.withTokenSource(tokenSource, meter: {
-                try await self.meter(Self.unitCost.threadsGet, key: quotaKey)
+                try await self.meter(self.unitCost.threadsGet, key: quotaKey)
             }) { token in
                 try await self.threadRequest(accessToken: token, threadId: threadId, format: format, quotaKey: quotaKey)
             }
@@ -429,10 +429,10 @@ public final class GmailAPIClient: Sendable {
     }
 
     /// Batched thread fetch: one `/batch/gmail/v1` envelope per chunk of up to
-    /// 50 threads (`GmailBatchProtocol.maxOperations(for:unitCost:lane:)`)
+    /// 50 threads (`GmailBatchProtocol.maxOperations(for:unitCost:lane:bulkEnvelopeUnits:)`)
     /// (was 5 concurrent single gets + a 50ms sleep — one round trip per
     /// thread). Falls back to the per-id path if the batch endpoint rejects
-    /// the envelope. `threads.get` costs `GmailQuotaProfile.active.threadsGetCost`
+    /// the envelope. `threads.get` costs `quotaBucket.profile.threadsGetCost`
     /// quota units, debited from `quotaKey`'s bucket (the account id — Gmail's
     /// ceiling is per user and this client is shared across accounts).
     public func getThreadsBatch(
@@ -452,7 +452,7 @@ public final class GmailAPIClient: Sendable {
                 resource: "threads",
                 ids: threadIds,
                 format: format,
-                unitCost: GmailQuotaProfile.active.threadsGetCost,
+                unitCost: quotaBucket.profile.threadsGetCost,
                 quotaKey: quotaKey,
                 as: GmailThread.self
             )
@@ -481,7 +481,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.messagesGet, key: quotaKey)
+            try await self.meter(self.unitCost.messagesGet, key: quotaKey)
             return try await self.messageRequest(accessToken: accessToken, messageId: messageId, format: format, quotaKey: quotaKey)
         }
     }
@@ -497,7 +497,7 @@ public final class GmailAPIClient: Sendable {
     ) async throws -> GmailMessage {
         try await withRetry(maxRetries: 3) {
             try await self.withTokenSource(tokenSource, meter: {
-                try await self.meter(Self.unitCost.messagesGet, key: quotaKey)
+                try await self.meter(self.unitCost.messagesGet, key: quotaKey)
             }) { token in
                 try await self.messageRequest(accessToken: token, messageId: messageId, format: format, quotaKey: quotaKey)
             }
@@ -551,7 +551,7 @@ public final class GmailAPIClient: Sendable {
             // 20 units — as expensive as a full `messages.get`. This is the
             // call whose 16,603-row eager sweep starved the 2026-09-12
             // backfill while the bucket showed a rate it was not holding.
-            try await self.meter(Self.unitCost.attachmentsGet, key: quotaKey)
+            try await self.meter(self.unitCost.attachmentsGet, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/attachments/\(attachmentId)")
 
             var request = URLRequest(url: url)
@@ -602,10 +602,10 @@ public final class GmailAPIClient: Sendable {
     }
 
     /// Batched message fetch: one `/batch/gmail/v1` envelope per chunk of up to
-    /// 50 ids (`GmailBatchProtocol.maxOperations(for:unitCost:lane:)`)
+    /// 50 ids (`GmailBatchProtocol.maxOperations(for:unitCost:lane:bulkEnvelopeUnits:)`)
     /// instead of one HTTPS round trip per message at 5-way concurrency.
     /// Falls back to the per-id path if the batch endpoint rejects the
-    /// envelope. `messages.get` costs `GmailQuotaProfile.active.messagesGetCost`
+    /// envelope. `messages.get` costs `quotaBucket.profile.messagesGetCost`
     /// quota units, debited from `quotaKey`'s bucket (see `getThreadsBatch`).
     public func getMessages(
         tokenSource: GmailTokenSource,
@@ -641,7 +641,7 @@ public final class GmailAPIClient: Sendable {
                 resource: "messages",
                 ids: messageIds,
                 format: format,
-                unitCost: GmailQuotaProfile.active.messagesGetCost,
+                unitCost: quotaBucket.profile.messagesGetCost,
                 quotaKey: quotaKey,
                 as: GmailMessage.self
             )
@@ -676,7 +676,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.messagesModify, key: quotaKey)
+            try await self.meter(self.unitCost.messagesModify, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/modify")
 
             var request = URLRequest(url: url)
@@ -731,7 +731,7 @@ public final class GmailAPIClient: Sendable {
                 // Flat 50 units per CALL, not per id — `messages.batchModify`
                 // is priced as one operation however many ids it carries,
                 // which is exactly why the drainer batches by (kind, payload).
-                try await self.meter(Self.unitCost.messagesBatchModify, key: quotaKey)
+                try await self.meter(self.unitCost.messagesBatchModify, key: quotaKey)
                 let url = try self.simpleURL("\(self.baseURL)/messages/batchModify")
 
                 var request = URLRequest(url: url)
@@ -776,7 +776,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.messagesTrash, key: quotaKey)
+            try await self.meter(self.unitCost.messagesTrash, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/trash")
 
             var request = URLRequest(url: url)
@@ -816,7 +816,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.messagesUntrash, key: quotaKey)
+            try await self.meter(self.unitCost.messagesUntrash, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/untrash")
 
             var request = URLRequest(url: url)
@@ -856,7 +856,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.messagesDelete, key: quotaKey)
+            try await self.meter(self.unitCost.messagesDelete, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)")
 
             var request = URLRequest(url: url)
@@ -908,7 +908,7 @@ public final class GmailAPIClient: Sendable {
             // person's outgoing mail for a minute (or ten). The send is still
             // charged and still reports any rate signal (`send(_:quotaKey:)`),
             // so bulk backs off; its own 429 gets `withRetry`'s short backoff.
-            try await self.meter(Self.unitCost.messagesSend, key: quotaKey, parkable: false)
+            try await self.meter(self.unitCost.messagesSend, key: quotaKey, parkable: false)
             let url = try self.simpleURL("\(self.baseURL)/messages/send")
 
             var request = URLRequest(url: url)
@@ -955,7 +955,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> DraftResponse {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.draftsCreate, key: quotaKey)
+            try await self.meter(self.unitCost.draftsCreate, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/drafts")
 
             var request = URLRequest(url: url)
@@ -1005,7 +1005,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> DraftResponse {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.draftsUpdate, key: quotaKey)
+            try await self.meter(self.unitCost.draftsUpdate, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/drafts/\(draftId)")
 
             var request = URLRequest(url: url)
@@ -1052,7 +1052,7 @@ public final class GmailAPIClient: Sendable {
         quotaKey: String = GmailQuotaScope.current
     ) async throws {
         try await withRetry(maxRetries: 3) {
-            try await self.meter(Self.unitCost.draftsDelete, key: quotaKey)
+            try await self.meter(self.unitCost.draftsDelete, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/drafts/\(draftId)")
 
             var request = URLRequest(url: url)

@@ -96,11 +96,6 @@ public struct GmailQuotaProfile: Sendable {
     /// each ingest their own mail against it, so 50 u/s is one device's
     /// ceiling, not the account's: three devices at 50 ask for 150.
     public static let current = GmailQuotaProfile(unitsPerSecond: 50, perUserUnitsPerSecond: 100, unitCost: .documented)
-
-    /// The profile this build meters itself against. Switched from `legacy`
-    /// on 2026-09-11: the first all-time full sync on the new project ran ~10x
-    /// over budget and lost ~80% of messages to per-item 429s.
-    public static let active = current
 }
 
 /// Which pacing lane a reservation belongs to.
@@ -152,7 +147,7 @@ public enum GmailQuotaLane: Sendable, Hashable {
     }
 }
 
-/// Per-account token buckets over `GmailQuotaProfile.active`, with AIMD
+/// Per-account token buckets over the bucket's `GmailQuotaProfile`, with AIMD
 /// adaptation from the server's rate signals.
 ///
 /// Modelled as a virtual clock rather than a literal token count: each
@@ -169,9 +164,9 @@ public enum GmailQuotaLane: Sendable, Hashable {
 /// ## The AIMD invariant
 ///
 /// `rate` for a key only ever moves two ways: HALVED (floor
-/// `minimumUnitsPerSecond`) the moment the server says we are over budget, and
+/// `minimumRate`) the moment the server says we are over budget, and
 /// raised by `recoveryFraction` of the profile ceiling per clean
-/// `recoveryInterval`, never above `GmailQuotaProfile.active.unitsPerSecond`.
+/// `recoveryInterval`, never above the bucket's `profile.unitsPerSecond`.
 /// A rate signal also parks the key until `now + cooldown`, so the first
 /// reservation after a 403/429 wave waits out the per-minute quota window
 /// instead of re-spending into it. Every paced caller — batch envelopes, the
@@ -179,12 +174,67 @@ public enum GmailQuotaLane: Sendable, Hashable {
 /// same object, so one account's backoff is shared rather than re-learned.
 public actor GmailQuotaBucket {
 
-    /// The process-wide bucket — the only one that persists its state, and
-    /// never inside a test process (a test that reaches `.shared` through a
-    /// default `GmailAPIClient()` must not write `UserDefaults.standard`).
-    public static let shared = GmailQuotaBucket(
-        stateStore: GmailQuotaProcess.isTestProcess ? nil : UserDefaultsGmailQuotaStateStore()
-    )
+    /// The process-wide bucket a default `GmailAPIClient()` debits. Built on
+    /// first touch from the `configureShared` settings — `.current` and
+    /// memory-only unless the host asked otherwise before that.
+    public static var shared: GmailQuotaBucket { sharedConfig.resolve() }
+
+    /// Choose the profile and persistence of `shared`. Call once at launch,
+    /// before anything touches `shared` (a default `GmailAPIClient()` does).
+    /// A second call, or one after `shared` was built, is ignored and
+    /// reported as a fault — honouring it would leave clients already
+    /// holding the old bucket metering against a different one.
+    ///
+    /// `shared` is built (and `stateStore.load()` runs) under a lock, so a
+    /// store must never touch `GmailQuotaBucket.shared` itself.
+    public static func configureShared(
+        profile: GmailQuotaProfile = .current,
+        stateStore: (any GmailQuotaStateStore)? = nil
+    ) {
+        sharedConfig.configure(profile: profile, stateStore: stateStore)
+    }
+
+    static let sharedConfig = SharedConfig()
+
+    /// The lock-protected, configure-once settings behind `shared`. A type
+    /// rather than bare statics so tests can exercise the ordering rules on
+    /// an instance of their own instead of the process-wide one.
+    final class SharedConfig: Sendable {
+        private struct State {
+            var profile = GmailQuotaProfile.current
+            var stateStore: (any GmailQuotaStateStore)?
+            var configured = false
+            var built: GmailQuotaBucket?
+        }
+
+        private let state = OSAllocatedUnfairLock(initialState: State())
+
+        /// Whether the settings were taken; false = ignored (and logged).
+        @discardableResult
+        func configure(profile: GmailQuotaProfile, stateStore: (any GmailQuotaStateStore)?) -> Bool {
+            let accepted = state.withLock { s -> Bool in
+                guard !s.configured, s.built == nil else { return false }
+                s.profile = profile
+                s.stateStore = stateStore
+                s.configured = true
+                return true
+            }
+            if !accepted {
+                GmailQuotaBucket.logger.fault("configureShared called twice or after GmailQuotaBucket.shared was first used — ignored")
+            }
+            return accepted
+        }
+
+        /// The bucket, built from the settings on the first call.
+        func resolve() -> GmailQuotaBucket {
+            state.withLock { s in
+                if let built = s.built { return built }
+                let bucket = GmailQuotaBucket(profile: s.profile, stateStore: s.stateStore)
+                s.built = bucket
+                return bucket
+            }
+        }
+    }
 
     public typealias NowProvider = @Sendable () -> Date
     public typealias Sleeper = @Sendable (TimeInterval) async throws -> Void
@@ -200,8 +250,20 @@ public actor GmailQuotaBucket {
 
     /// The rate never falls below this, however many signals arrive — at
     /// `messages.get` = 20 units it still buys one message every two seconds,
-    /// which is a slow sync rather than a stalled one.
+    /// which is a slow sync rather than a stalled one. A cap, not the floor
+    /// itself: see `minimumRate(ceiling:)`.
     static let minimumUnitsPerSecond: Double = 10
+
+    /// The floor for a profile whose ceiling is `ceiling`: `minimumUnitsPerSecond`,
+    /// or a fifth of the ceiling when that is lower — so a slow profile (at
+    /// or under 10 u/s) still backs off, and the floor never sits above the
+    /// ceiling.
+    static func minimumRate(ceiling: Double) -> Double {
+        min(minimumUnitsPerSecond, ceiling * 0.2)
+    }
+
+    /// `minimumRate(ceiling:)` at this bucket's profile.
+    nonisolated var minimumRate: Double { Self.minimumRate(ceiling: profile.unitsPerSecond) }
 
     /// Additive recovery: a clean interval adds this fraction of the profile
     /// ceiling back to the key's rate.
@@ -254,8 +316,11 @@ public actor GmailQuotaBucket {
     /// recovering at 0.8 re-probes into the wall every ~4 minutes, parking
     /// quick sync each time (`GmailQuotaSharedBudgetTests` policy report).
     ///
-    /// The arithmetic is for `GmailQuotaProfile.current` (50 u/s device,
-    /// 100 u/s user). Re-derive it if `active` ever changes profile.
+    /// The arithmetic above is for `GmailQuotaProfile.current` (50 u/s
+    /// device, 100 u/s user, 400-unit envelopes). The fraction is applied
+    /// unchanged to any other profile, where it still halves bulk but the
+    /// envelope-per-minute margin is NOT re-derived: a profile with a much
+    /// smaller user budget relative to its envelope size may collide sooner.
     static let contendedBulkRateFraction: Double = 0.5
 
     /// How long a device stays at the contended share after a rate signal.
@@ -275,8 +340,11 @@ public actor GmailQuotaBucket {
     /// 50-part `.metadata` envelope (a fresh install's first window) is
     /// 1,000 units, and at 25 u/s two of them fit in one minute per device —
     /// 6,000 for three devices, the whole budget. Applied by
-    /// `GmailBatchProtocol.maxOperations(for:unitCost:lane:)`.
-    static var bulkEnvelopeUnits: Int { 20 * GmailQuotaProfile.active.messagesGetCost }
+    /// `GmailBatchProtocol.maxOperations(for:unitCost:lane:bulkEnvelopeUnits:)`.
+    static func bulkEnvelopeUnits(for profile: GmailQuotaProfile) -> Int { 20 * profile.messagesGetCost }
+
+    /// `bulkEnvelopeUnits(for:)` at this bucket's profile.
+    nonisolated var bulkEnvelopeUnits: Int { Self.bulkEnvelopeUnits(for: profile) }
 
     /// How long the key still counts as interactive-busy after an
     /// interactive reservation's slot, and after an interactive request ends
@@ -396,6 +464,9 @@ public actor GmailQuotaBucket {
     var persisted: [String: GmailQuotaPersistedKey] = [:]
 
     nonisolated let policy: Policy
+    /// The rates and unit costs this bucket (and every client debiting it)
+    /// meters against.
+    public nonisolated let profile: GmailQuotaProfile
     nonisolated let now: NowProvider
     nonisolated let sleeper: Sleeper
     nonisolated let stateStore: (any GmailQuotaStateStore)?
@@ -409,22 +480,26 @@ public actor GmailQuotaBucket {
     ///   - sleeper: how a paced caller waits. Tests advance the virtual clock
     ///     here instead of sleeping.
     ///   - policy: the pacing policy; tests compare alternatives with it.
+    ///   - profile: the project's quota profile — the AIMD ceiling and the
+    ///     unit costs clients debit.
     ///   - stateStore: where the contention hold and AIMD rate persist across
-    ///     launches. nil (the default, and every test bucket) = memory only;
-    ///     `shared` passes the UserDefaults store.
+    ///     launches. nil (the default) = memory only; `shared` uses whatever
+    ///     `configureShared` was given.
     public init(
         now: @escaping NowProvider = { Date() },
         sleeper: Sleeper? = nil,
         policy: Policy = .shipped,
+        profile: GmailQuotaProfile = .current,
         stateStore: (any GmailQuotaStateStore)? = nil
     ) {
         self.policy = policy
+        self.profile = profile
         self.now = now
         self.sleeper = sleeper ?? { seconds in
             try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         }
         self.stateStore = stateStore
-        let restored = Self.restore(from: stateStore, now: now(), policy: policy)
+        let restored = Self.restore(from: stateStore, now: now(), policy: policy, ceiling: profile.unitsPerSecond)
         self.buckets = restored.buckets
         self.persisted = restored.persisted
     }
@@ -432,7 +507,7 @@ public actor GmailQuotaBucket {
     /// The rate `key` is currently paced at. Exposed for tests and for the
     /// log line that explains a slow sync.
     public func rate(for key: String) -> Double {
-        buckets[key]?.rate ?? GmailQuotaProfile.active.unitsPerSecond
+        buckets[key]?.rate ?? profile.unitsPerSecond
     }
 
     /// Debit `units` for `key` in `lane` and return how long the caller must
@@ -467,7 +542,7 @@ public actor GmailQuotaBucket {
         recoverIfDue(key: key, at: instant)
 
         var bucket = buckets[key] ?? Bucket()
-        let rate = bucket.rate ?? GmailQuotaProfile.active.unitsPerSecond
+        let rate = bucket.rate ?? profile.unitsPerSecond
         let floor = instant.addingTimeInterval(-Self.burstSeconds)
         // A bucket that has never spent starts AT `instant`, not at the floor:
         // the burst is credit an account earns by being idle, not a free
@@ -482,7 +557,7 @@ public actor GmailQuotaBucket {
         // Under a bulk-only policy the AIMD rate is the bulk lane's alone; a
         // restored state is the bulk lane's alone too, until this session's
         // own first signal (interactive then paces at the ceiling hint).
-        let ceiling = GmailQuotaProfile.active.unitsPerSecond
+        let ceiling = profile.unitsPerSecond
         let interactiveRate: Double
         if !policy.signalsThrottleInteractive {
             interactiveRate = ceiling
@@ -514,7 +589,7 @@ public actor GmailQuotaBucket {
     /// The bulk lane's rate for `bucket` at `instant`: the AIMD rate times
     /// the bulk share — the contended share while the hold runs.
     func bulkRate(of bucket: Bucket, at instant: Date) -> Double {
-        let rate = bucket.rate ?? GmailQuotaProfile.active.unitsPerSecond
+        let rate = bucket.rate ?? profile.unitsPerSecond
         let contended = policy.contendedBulkRateFraction.flatMap { fraction in
             (bucket.contendedUntil.map { instant < $0 } ?? false) ? fraction : nil
         }
@@ -529,7 +604,7 @@ public actor GmailQuotaBucket {
     public func noteRateLimited(key: String, retryAfter: TimeInterval? = nil) {
         let instant = now()
         var bucket = buckets[key] ?? Bucket()
-        let ceiling = GmailQuotaProfile.active.unitsPerSecond
+        let ceiling = profile.unitsPerSecond
         let previous = bucket.rate ?? ceiling
         let pause = min(Self.maxPause, max(Self.cooldown, retryAfter ?? 0))
         if policy.contendedBulkRateFraction != nil {
@@ -562,11 +637,11 @@ public actor GmailQuotaBucket {
             return
         }
 
-        let halved = max(Self.minimumUnitsPerSecond, previous / 2)
+        let halved = max(minimumRate, previous / 2)
         bucket.rate = halved
         bucket.lastRecovered = instant
         bucket.pausedUntil = instant.addingTimeInterval(pause)
-        bucket.limitHint = max(Self.minimumUnitsPerSecond, min(ceiling, previous * Self.limitHintFraction))
+        bucket.limitHint = max(minimumRate, min(ceiling, previous * Self.limitHintFraction))
         bucket.hintRelaxedAt = instant
         // Park the key: the next reservation waits out the quota window, and
         // anything already queued past that point keeps its later slot.
@@ -612,7 +687,7 @@ public actor GmailQuotaBucket {
 
     private func applyRecovery(key: String, at instant: Date) {
         guard var bucket = buckets[key], let rate = bucket.rate else { return }
-        let ceiling = GmailQuotaProfile.active.unitsPerSecond
+        let ceiling = profile.unitsPerSecond
         relaxHintIfDue(&bucket, at: instant, ceiling: ceiling)
         let target = min(ceiling, bucket.limitHint ?? ceiling)
         guard rate < target else {

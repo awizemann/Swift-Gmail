@@ -77,7 +77,7 @@ public enum GmailBatchProtocol {
     /// Operations per batch for a call on `lane` that costs `unitCost` a part.
     ///
     /// On the BULK lane an envelope is also capped at
-    /// `GmailQuotaBucket.bulkEnvelopeUnits` of quota (t-a9825f81). An envelope
+    /// `bulkEnvelopeUnits` (the debited bucket's `bulkEnvelopeUnits`) of quota (t-a9825f81). An envelope
     /// spends its whole cost in one instant, and the per-user budget is shared
     /// by every device on the account, so the lump matters as much as the
     /// average: a 50-part `.metadata` envelope is 1,000 units, and three
@@ -87,11 +87,12 @@ public enum GmailBatchProtocol {
     static func maxOperations(
         for format: MessageFormat,
         unitCost: Int,
-        lane: GmailQuotaLane
+        lane: GmailQuotaLane,
+        bulkEnvelopeUnits: Int
     ) -> Int {
         let byFormat = maxOperations(for: format)
         guard lane == .bulk, unitCost > 0 else { return byFormat }
-        return min(byFormat, max(1, GmailQuotaBucket.bulkEnvelopeUnits / unitCost))
+        return min(byFormat, max(1, bulkEnvelopeUnits / unitCost))
     }
 
     /// Concurrent envelopes in flight — enough to hide round-trip latency

@@ -4,7 +4,7 @@
 //
 //  Batched `messages.get` / `threads.get` over Gmail's `/batch/gmail/v1`
 //  endpoint. One HTTPS round trip carries up to 50 sub-requests (see
-//  `GmailBatchProtocol.maxOperations(for:unitCost:lane:)`; the bulk lane caps an
+//  `GmailBatchProtocol.maxOperations(for:unitCost:lane:bulkEnvelopeUnits:)`; the bulk lane caps an
 //  envelope at 400 units), which is where the sync-speed
 //  win comes from: the old path paid a full request latency per message at
 //  5-way concurrency.
@@ -81,7 +81,8 @@ extension GmailAPIClient {
         guard !ids.isEmpty else { return .complete([]) }
 
         let chunks = ids.chunkedForBatch(into: GmailBatchProtocol.maxOperations(
-            for: format, unitCost: unitCost, lane: GmailQuotaLane.current
+            for: format, unitCost: unitCost, lane: GmailQuotaLane.current,
+            bulkEnvelopeUnits: quotaBucket.bulkEnvelopeUnits
         ))
         let maxBatchesInFlight = GmailBatchProtocol.maxBatchesInFlight(for: format)
         let gate = GmailTokenRefreshGate(source: tokenSource)

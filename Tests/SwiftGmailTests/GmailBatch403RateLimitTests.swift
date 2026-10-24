@@ -120,7 +120,7 @@ struct GmailBatch403RateLimitTests {
                 resource: "messages",
                 ids: ids,
                 format: .metadata,
-                unitCost: GmailQuotaProfile.active.messagesGetCost,
+                unitCost: GmailQuotaProfile.current.messagesGetCost,
                 quotaKey: quotaKey,
                 retryDelay: 0,
                 as: GmailMessage.self
@@ -161,7 +161,7 @@ struct GmailBatch403RateLimitTests {
             // Halved on the signal, then one additive step back up — the clean
             // minute the re-issue waited out IS a recovery interval, so the
             // full AIMD cycle is visible in a single fetch.
-            let ceiling = GmailQuotaProfile.active.unitsPerSecond
+            let ceiling = GmailQuotaProfile.current.unitsPerSecond
             let step = GmailQuotaBucket.recoveryFraction * ceiling
             #expect(await bucket.rate(for: "rate-403") == ceiling / 2 + step, "multiplicative decrease, then one clean-minute recovery step")
         }
@@ -277,7 +277,7 @@ struct GmailBatch403RateLimitTests {
 
             #expect(outcome.fetched.count == 1, "an envelope 403 that means 'slow down' must not fail the pass")
             #expect(BatchStub.requestCount == 2)
-            let ceiling = GmailQuotaProfile.active.unitsPerSecond
+            let ceiling = GmailQuotaProfile.current.unitsPerSecond
             let step = GmailQuotaBucket.recoveryFraction * ceiling
             #expect(await bucket.rate(for: "envelope-403") == ceiling / 2 + step, "the envelope signal throttles the account too, then recovers a step")
         }
@@ -308,7 +308,7 @@ struct GmailBatch403RateLimitTests {
         func bucketHalvesAndRecovers() async throws {
             let clock = VirtualClock()
             let bucket = clock.bucket()
-            let ceiling = GmailQuotaProfile.active.unitsPerSecond
+            let ceiling = GmailQuotaProfile.current.unitsPerSecond
             let key = "aimd"
 
             #expect(await bucket.rate(for: key) == ceiling, "an unsignalled account runs at the profile ceiling")
@@ -359,7 +359,7 @@ struct GmailBatch403RateLimitTests {
         func recoverySettlesUnderTheHint() async throws {
             let clock = VirtualClock()
             let bucket = clock.bucket()
-            let ceiling = GmailQuotaProfile.active.unitsPerSecond
+            let ceiling = GmailQuotaProfile.current.unitsPerSecond
             let key = "hint"
 
             // Signal at the ceiling: hint = 90% of it, rate halves.

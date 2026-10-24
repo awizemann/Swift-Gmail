@@ -21,7 +21,7 @@ struct GmailUnitCostTests {
     ///
     /// This test is the citation. If Google restates the table, this is the
     /// one place that has to change — every call site reads
-    /// `GmailQuotaProfile.active.unitCost` rather than a literal.
+    /// `GmailQuotaProfile.current.unitCost` rather than a literal.
     @Test(
         "Every metered method's cost matches Google's documented table",
         arguments: [
@@ -96,7 +96,7 @@ struct GmailUnitCostTests {
         let clock = VirtualClock()
         let bucket = clock.bucket()
         let cost = GmailUnitCost.documented.attachmentsGet
-        let rate = GmailQuotaProfile.active.unitsPerSecond
+        let rate = GmailQuotaProfile.current.unitsPerSecond
 
         // Two reservations on each lane; the SECOND is the one that waits,
         // because the first consumes the idle burst.

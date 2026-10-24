@@ -76,6 +76,9 @@ public struct GmailQuotaPersistedKey: Codable, Sendable, Equatable {
 
 /// Where `GmailQuotaBucket` keeps its cross-launch state. Injectable so tests
 /// never touch `UserDefaults.standard`.
+///
+/// `load()` for `GmailQuotaBucket.shared` runs while its lazy construction
+/// holds a lock: an implementation must never touch `GmailQuotaBucket.shared`.
 public protocol GmailQuotaStateStore: Sendable {
     func load() -> [String: GmailQuotaPersistedKey]
     func save(_ state: [String: GmailQuotaPersistedKey])
@@ -185,17 +188,4 @@ extension GmailQuotaPersistedKey {
         )
         return entry.isEmpty ? nil : entry
     }
-}
-
-/// Whether this process is a test runner — the shared bucket must not persist
-/// into `UserDefaults.standard` from one.
-enum GmailQuotaProcess {
-    static let isTestProcess: Bool = {
-        let info = ProcessInfo.processInfo
-        if info.environment["XCTestConfigurationFilePath"] != nil { return true }
-        if info.environment["XCTestBundlePath"] != nil { return true }
-        let name = info.processName
-        if name == "xctest" || name.contains("swiftpm-testing-helper") || name.hasSuffix("PackageTests") { return true }
-        return NSClassFromString("XCTestCase") != nil
-    }()
 }

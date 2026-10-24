@@ -27,7 +27,8 @@ extension GmailQuotaBucket {
     static func restore(
         from store: (any GmailQuotaStateStore)?,
         now instant: Date,
-        policy: Policy
+        policy: Policy,
+        ceiling: Double
     ) -> (buckets: [String: Bucket], persisted: [String: GmailQuotaPersistedKey]) {
         guard let store else { return ([:], [:]) }
         var buckets: [String: Bucket] = [:]
@@ -37,8 +38,8 @@ extension GmailQuotaBucket {
                 now: instant,
                 hold: policy.contentionHold,
                 maxPause: maxRestoredPause,
-                minimumRate: minimumUnitsPerSecond,
-                ceiling: GmailQuotaProfile.active.unitsPerSecond
+                minimumRate: minimumRate(ceiling: ceiling),
+                ceiling: ceiling
             ) else { continue }
             persisted[key] = entry
             var bucket = Bucket()
@@ -52,7 +53,7 @@ extension GmailQuotaBucket {
             bucket.restoredBulkOnly = true
             buckets[key] = bucket
             let remaining = bucket.contendedUntil.map { Int($0.timeIntervalSince(instant) / 60) } ?? 0
-            let rate = entry.rate ?? GmailQuotaProfile.active.unitsPerSecond
+            let rate = entry.rate ?? ceiling
             logger.notice("Gmail quota: restored contended state for \(key, privacy: .public) — bulk rate \(String(format: "%.0f", rate), privacy: .public) u/s, contended for \(remaining, privacy: .public) more min, hint \(entry.limitHint.map { String(format: "%.0f", $0) } ?? "none", privacy: .public)")
         }
         return (buckets, persisted)
