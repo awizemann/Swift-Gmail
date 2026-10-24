@@ -149,7 +149,7 @@ extension GmailAPIClient {
         let token = try await source.current()
         do {
             return try await request(token)
-        } catch GmailAPIError.httpError(let statusCode) where statusCode == 401 && source.canRefresh {
+        } catch GmailAPIError.httpError(let statusCode, _) where statusCode == 401 && source.canRefresh {
             // Meter BEFORE resolving the replacement: a long bucket wait
             // must not age the token the re-send carries.
             try await meter?()
@@ -157,7 +157,7 @@ extension GmailAPIClient {
             guard fresh != token else { throw Self.refreshedTokenRejected(source) }
             do {
                 return try await request(fresh)
-            } catch GmailAPIError.httpError(let statusCode) where statusCode == 401 {
+            } catch GmailAPIError.httpError(let statusCode, _) where statusCode == 401 {
                 throw Self.refreshedTokenRejected(source)
             }
         }

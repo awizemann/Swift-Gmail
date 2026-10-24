@@ -127,6 +127,37 @@ Loggers use the `SwiftGmail` subsystem. To fold them into your app's, call
 `GmailLogging.configure(subsystem:)` once at launch, before the first client
 exists. A later call is ignored and logged as a fault.
 
+### Errors and retries
+
+Every call throws `GmailAPIError`. A non-2xx response is classified once, the
+same way for every endpoint:
+
+- **401, 404, 5xx, a refusal 403** → `.httpError(statusCode:detail:)`. `detail`
+  is a `GmailErrorDetail` parsed from Gmail's error body: `reason`
+  (`error.errors[0].reason`, else `error.status`), `message`, and `retryAfter`
+  (the `Retry-After` header, seconds form). It is nil when the body held none
+  of these (empty, or a proxy's HTML page).
+- **429, or a 403 with a rate reason** (`userRateLimitExceeded`,
+  `rateLimitExceeded`, `quotaExceeded`, status `RESOURCE_EXHAUSTED`) → retried
+  with backoff; if retries run out, a 429 surfaces as
+  `.httpError(statusCode: 429, …)` and a 403 as `.rateLimitExceeded`.
+  `quotaExceeded` is retried because Google APIs use it for per-minute and
+  concurrency quotas.
+- **403 or 429 with `dailyLimitExceeded`** → `.quotaExceeded`, never retried:
+  the day's quota will not come back within a backoff. This is the only
+  terminal reason.
+- `history.list`'s 404 is `.historyIdExpired` (run a full sync), and deleting a
+  draft that is already gone (404/410) succeeds.
+
+Reads, label changes, trash/untrash/delete, `drafts.update` and `drafts.delete`
+are idempotent and retry 5xx, 429, rate-limit 403s and transient network errors
+(timeout, connection lost), up to three times.
+
+`sendMessage` and `createDraft` are not idempotent. They retry only a 429 or a
+rate-limit 403, which Gmail returns before accepting the request. A 5xx or a
+timeout fails after one attempt, because Gmail may already have accepted the
+message (or created the draft) and a retry would send it twice.
+
 ## Upgrading from 0.1.0
 
 `GmailQuotaBucket.shared` no longer persists to `UserDefaults` on its own, and
@@ -137,6 +168,29 @@ Assistant-style mail app, calls this at launch to keep it:
 ```swift
 GmailQuotaBucket.configureShared(stateStore: UserDefaultsGmailQuotaStateStore())
 ```
+
+`GmailAPIError.httpError` now carries a `detail`, so code that matches on it
+needs one more pattern slot:
+
+- `case .httpError(let code)` becomes `case .httpError(let code, _)`.
+- `catch GmailAPIError.httpError(statusCode: 404)` becomes
+  `catch GmailAPIError.httpError(statusCode: 404, _)`.
+- `catch GmailAPIError.httpError(let code) where code == 404` becomes
+  `catch GmailAPIError.httpError(let code, _) where code == 404`.
+
+Constructing one is unchanged (`GmailAPIError.httpError(statusCode: 500)`
+still compiles). Behavior changes:
+
+- The list and read endpoints (`listMessages`, `listDrafts`, `getProfile`,
+  `listLabels`, `listHistory`, `listThreads`) now retry like the other reads.
+  A rate limit can add up to about 35 s of backoff before the error surfaces.
+- Each attempt is metered against the quota bucket, retries included.
+- `sendMessage` and `createDraft` are no longer retried after a 5xx (or a
+  timeout).
+- A `dailyLimitExceeded` 403 or 429 throws `.quotaExceeded` (it used to be
+  `.rateLimitExceeded` on some endpoints and a bare 403 on others).
+- `deleteMessage` treats a 404 on a retry as success, since the earlier
+  attempt that failed with a 5xx may already have deleted the message.
 
 ## Requirements
 

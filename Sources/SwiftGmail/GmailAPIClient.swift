@@ -111,7 +111,6 @@ public final class GmailAPIClient: Sendable {
         includeSpamTrash: Bool = false,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> ListMessagesResponse {
-        try await meter(self.unitCost.messagesList, key: quotaKey)
         // `includeSpamTrash` defaults to FALSE server-side, and that filter is
         // applied to the RESULTS — an `in:spam` query without it comes back
         // empty. Only full sync's spam listing asks for it.
@@ -132,24 +131,12 @@ public final class GmailAPIClient: Sendable {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await self.send(request, quotaKey: quotaKey)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailAPIError.invalidResponse
+        return try await withRetry(maxRetries: 3) {
+            try await self.meter(self.unitCost.messagesList, key: quotaKey)
+            let (data, response) = try await self.send(request, quotaKey: quotaKey)
+            try self.checkedResponse(response, body: data, call: "messages.list")
+            return try JSONDecoder().decode(ListMessagesResponse.self, from: data)
         }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            logger.error("Gmail messages.list failed with HTTP \(httpResponse.statusCode)")
-            // Gmail reports per-user rate limiting as a 403 whose body carries
-            // the reason; classify it like `getThread` does so a caller sees a
-            // rate limit (and backs off) rather than a bare 403.
-            if httpResponse.statusCode == 403 {
-                throw gmailError(from: httpResponse, body: data, call: "messages.list")
-            }
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
-
-        return try JSONDecoder().decode(ListMessagesResponse.self, from: data)
     }
 
     /// List the account's drafts (partial resources: stable draft id +
@@ -163,7 +150,6 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> ListDraftsResponse {
-        try await meter(self.unitCost.draftsList, key: quotaKey)
         var queryItems = [URLQueryItem(name: "maxResults", value: String(maxResults))]
         if let pageToken = pageToken {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
@@ -174,18 +160,12 @@ public final class GmailAPIClient: Sendable {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
 
-        let (data, response) = try await self.send(request, quotaKey: quotaKey)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailAPIError.invalidResponse
+        return try await withRetry(maxRetries: 3) {
+            try await self.meter(self.unitCost.draftsList, key: quotaKey)
+            let (data, response) = try await self.send(request, quotaKey: quotaKey)
+            try self.checkedResponse(response, body: data, call: "drafts.list")
+            return try JSONDecoder().decode(ListDraftsResponse.self, from: data)
         }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            logger.error("Gmail drafts.list failed with HTTP \(httpResponse.statusCode, privacy: .public)")
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
-
-        return try JSONDecoder().decode(ListDraftsResponse.self, from: data)
     }
 
     /// Fetch the user's profile (cheap; useful as a historyId fallback).
@@ -193,45 +173,36 @@ public final class GmailAPIClient: Sendable {
         accessToken: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailProfile {
-        try await meter(self.unitCost.getProfile, key: quotaKey)
         let url = try simpleURL("\(baseURL)/profile")
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
 
-        let (data, response) = try await self.send(request, quotaKey: quotaKey)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailAPIError.invalidResponse
+        return try await withRetry(maxRetries: 3) {
+            try await self.meter(self.unitCost.getProfile, key: quotaKey)
+            let (data, response) = try await self.send(request, quotaKey: quotaKey)
+            try self.checkedResponse(response, body: data, call: "getProfile")
+            return try JSONDecoder().decode(GmailProfile.self, from: data)
         }
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
-        return try JSONDecoder().decode(GmailProfile.self, from: data)
     }
 
     public func listLabels(
         accessToken: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> [GmailLabel] {
-        try await meter(self.unitCost.labelsList, key: quotaKey)
         let url = try simpleURL("\(baseURL)/labels")
 
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
 
-        let (data, response) = try await self.send(request, quotaKey: quotaKey)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailAPIError.invalidResponse
+        return try await withRetry(maxRetries: 3) {
+            try await self.meter(self.unitCost.labelsList, key: quotaKey)
+            let (data, response) = try await self.send(request, quotaKey: quotaKey)
+            try self.checkedResponse(response, body: data, call: "labels.list")
+            let labelsResponse = try JSONDecoder().decode(ListLabelsResponse.self, from: data)
+            return labelsResponse.labels ?? []
         }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
-
-        let labelsResponse = try JSONDecoder().decode(ListLabelsResponse.self, from: data)
-        return labelsResponse.labels ?? []
     }
 
     /// List history changes since a given historyId.
@@ -243,11 +214,13 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> HistoryListResponse {
-        try await meter(self.unitCost.historyList, key: quotaKey)
-        return try await historyRequest(
-            accessToken: accessToken, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
-            quotaKey: quotaKey
-        )
+        try await withRetry(maxRetries: 3) {
+            try await self.meter(self.unitCost.historyList, key: quotaKey)
+            return try await self.historyRequest(
+                accessToken: accessToken, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
+                quotaKey: quotaKey
+            )
+        }
     }
 
     /// The same page, with the token resolved AFTER the bucket's wait and a
@@ -263,14 +236,16 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> HistoryListResponse {
-        try await withTokenSource(tokenSource, meter: {
-            // Every send is metered — the 401 re-send included.
-            try await self.meter(self.unitCost.historyList, key: quotaKey)
-        }) { token in
-            try await historyRequest(
-                accessToken: token, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
-                quotaKey: quotaKey
-            )
+        try await withRetry(maxRetries: 3) {
+            try await self.withTokenSource(tokenSource, meter: {
+                // Every send is metered — the 401 re-send included.
+                try await self.meter(self.unitCost.historyList, key: quotaKey)
+            }) { token in
+                try await self.historyRequest(
+                    accessToken: token, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
+                    quotaKey: quotaKey
+                )
+            }
         }
     }
 
@@ -300,18 +275,12 @@ public final class GmailAPIClient: Sendable {
 
         let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailAPIError.invalidResponse
-        }
-
-        if httpResponse.statusCode == 404 {
+        // history.list's 404 is the stale-cursor signal, not a missing resource.
+        if (response as? HTTPURLResponse)?.statusCode == 404 {
             throw GmailAPIError.historyIdExpired
         }
 
-        guard (200...299).contains(httpResponse.statusCode) else {
-            logger.error("Gmail history.list failed with HTTP \(httpResponse.statusCode)")
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
+        try checkedResponse(response, body: data, call: "history.list")
 
         return try JSONDecoder().decode(HistoryListResponse.self, from: data)
     }
@@ -332,7 +301,6 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> ListThreadsResponse {
-        try await meter(self.unitCost.threadsList, key: quotaKey)
         var queryItems = [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "maxResults", value: String(maxResults)),
@@ -347,18 +315,12 @@ public final class GmailAPIClient: Sendable {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await self.send(request, quotaKey: quotaKey)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailAPIError.invalidResponse
+        return try await withRetry(maxRetries: 3) {
+            try await self.meter(self.unitCost.threadsList, key: quotaKey)
+            let (data, response) = try await self.send(request, quotaKey: quotaKey)
+            try self.checkedResponse(response, body: data, call: "threads.list")
+            return try JSONDecoder().decode(ListThreadsResponse.self, from: data)
         }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            logger.error("Gmail threads.list failed with HTTP \(httpResponse.statusCode)")
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
-
-        return try JSONDecoder().decode(ListThreadsResponse.self, from: data)
     }
 
     public func getThread(
@@ -407,23 +369,7 @@ public final class GmailAPIClient: Sendable {
 
         let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailAPIError.invalidResponse
-        }
-
-        if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
-
-        // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-        // body's reason tells it apart from a real permission refusal.
-        if httpResponse.statusCode == 403 {
-            throw self.gmailError(from: httpResponse, body: data, call: "getThread")
-        }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
+        try self.checkedResponse(response, body: data, call: "getThread")
 
         return try JSONDecoder().decode(GmailThread.self, from: data)
     }
@@ -520,23 +466,7 @@ public final class GmailAPIClient: Sendable {
 
         let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GmailAPIError.invalidResponse
-        }
-
-        if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
-
-        // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-        // body's reason tells it apart from a real permission refusal.
-        if httpResponse.statusCode == 403 {
-            throw self.gmailError(from: httpResponse, body: data, call: "getMessage")
-        }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-        }
+        try self.checkedResponse(response, body: data, call: "getMessage")
 
         return try JSONDecoder().decode(GmailMessage.self, from: data)
     }
@@ -560,23 +490,7 @@ public final class GmailAPIClient: Sendable {
 
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailAPIError.invalidResponse
-            }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-            // body's reason tells it apart from a real permission refusal.
-            if httpResponse.statusCode == 403 {
-                throw self.gmailError(from: httpResponse, body: data, call: "getAttachment")
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(response, body: data, call: "getAttachment")
 
             struct AttachmentResponse: Codable {
                 let size: Int
@@ -693,24 +607,7 @@ public final class GmailAPIClient: Sendable {
 
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailAPIError.invalidResponse
-            }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-            // body's reason tells it apart from a real permission refusal.
-            if httpResponse.statusCode == 403 {
-                throw self.gmailError(from: httpResponse, body: data, call: "modifyMessage")
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                self.logger.error("Gmail messages.modify failed with HTTP \(httpResponse.statusCode) for message \(messageId)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(response, body: data, call: "modifyMessage")
 
             return try JSONDecoder().decode(GmailMessage.self, from: data)
         }
@@ -747,20 +644,9 @@ public final class GmailAPIClient: Sendable {
                 ]
                 request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-                let (_, response) = try await self.send(request, quotaKey: quotaKey)
+                let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-                guard let httpResponse = response as? HTTPURLResponse else {
-                    throw GmailAPIError.invalidResponse
-                }
-
-                if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                    throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-                }
-
-                guard (200...299).contains(httpResponse.statusCode) else {
-                    self.logger.error("Gmail messages.batchModify failed with HTTP \(httpResponse.statusCode)")
-                    throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-                }
+                try self.checkedResponse(response, body: data, call: "messages.batchModify")
             }
         }
 
@@ -786,24 +672,7 @@ public final class GmailAPIClient: Sendable {
 
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailAPIError.invalidResponse
-            }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-            // body's reason tells it apart from a real permission refusal.
-            if httpResponse.statusCode == 403 {
-                throw self.gmailError(from: httpResponse, body: data, call: "trashMessage")
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                self.logger.error("Gmail messages.trash failed with HTTP \(httpResponse.statusCode) for message \(messageId)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(response, body: data, call: "trashMessage")
 
             return try JSONDecoder().decode(GmailMessage.self, from: data)
         }
@@ -826,24 +695,7 @@ public final class GmailAPIClient: Sendable {
 
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailAPIError.invalidResponse
-            }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-            // body's reason tells it apart from a real permission refusal.
-            if httpResponse.statusCode == 403 {
-                throw self.gmailError(from: httpResponse, body: data, call: "untrashMessage")
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                self.logger.error("Gmail messages.untrash failed with HTTP \(httpResponse.statusCode) for message \(messageId)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(response, body: data, call: "untrashMessage")
 
             return try JSONDecoder().decode(GmailMessage.self, from: data)
         }
@@ -855,7 +707,13 @@ public final class GmailAPIClient: Sendable {
         messageId: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws {
+        // A 5xx is retried, but the attempt that 5xx'd may still have deleted
+        // the message — so a 404 on a RETRY is the desired end state, not a
+        // failure. A first-attempt 404 still throws: the caller asked to
+        // delete something that was never there.
+        let attempts = AttemptCounter()
         try await withRetry(maxRetries: 3) {
+            let isRetry = attempts.next() > 1
             try await self.meter(self.unitCost.messagesDelete, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)")
 
@@ -864,20 +722,13 @@ public final class GmailAPIClient: Sendable {
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
             request.timeoutInterval = 30
 
-            let (_, response) = try await self.send(request, quotaKey: quotaKey)
+            let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailAPIError.invalidResponse
+            if isRetry, (response as? HTTPURLResponse)?.statusCode == 404 {
+                self.logger.info("Gmail messages.delete: message \(messageId) gone on retry — an earlier attempt deleted it")
+                return
             }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                self.logger.error("Gmail messages.delete failed with HTTP \(httpResponse.statusCode) for message \(messageId)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(response, body: data, call: "messages.delete")
         }
 
         logger.info("Permanently deleted message \(messageId)")
@@ -886,7 +737,7 @@ public final class GmailAPIClient: Sendable {
     // MARK: - Send / Drafts
 
     /// Send `rawMessage` — a base64url-encoded RFC 2822 message the caller
-    /// built. 100 units; never retried on a client-side timeout.
+    /// built. 100 units; retried only when Gmail rate-limited it.
     @discardableResult
     public func sendMessage(
         accessToken: String,
@@ -894,13 +745,14 @@ public final class GmailAPIClient: Sendable {
         threadId: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> SendMessageResponse {
-        // retryClientErrors: false — messages.send is NOT idempotent (Gmail has
-        // no idempotency-key surface), so a CLIENT-side timeout
-        // must NOT trigger a re-POST: the server may have accepted the first
-        // attempt, and retrying would double-send. A client timeout surfaces as
-        // a failure after one attempt (~60s) → the caller reverts to a failed
-        // state fast. 5xx/429 remain retryable (server rejected → safe).
-        try await withRetry(maxRetries: 3, retryClientErrors: false) {
+        // messages.send is NOT idempotent (Gmail has no idempotency-key
+        // surface), so only a failure that proves the message was REJECTED
+        // before acceptance is retried: a 429 or a rate-reason 403. A 5xx is
+        // not proof — Gmail can return one after it has already accepted (and
+        // will deliver) the message — and a client timeout is just as
+        // ambiguous. Either surfaces after one attempt so the caller can show
+        // a failure rather than risk a double-send.
+        try await withRetry(maxRetries: 3, retryClientErrors: false, retryServerErrors: false) {
             // 100 units — the most expensive call in the API, and the reason a
             // send must never sit behind a backfill's queue. It rides the
             // INTERACTIVE lane (the task-local default): a person is waiting.
@@ -925,24 +777,7 @@ public final class GmailAPIClient: Sendable {
 
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailAPIError.invalidResponse
-            }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-            // body's reason tells it apart from a real permission refusal.
-            if httpResponse.statusCode == 403 {
-                throw self.gmailError(from: httpResponse, body: data, call: "sendMessage")
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                self.logger.error("Gmail messages.send failed with HTTP \(httpResponse.statusCode)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(response, body: data, call: "sendMessage")
 
             return try JSONDecoder().decode(SendMessageResponse.self, from: data)
         }
@@ -954,7 +789,11 @@ public final class GmailAPIClient: Sendable {
         threadId: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> DraftResponse {
-        try await withRetry(maxRetries: 3) {
+        // Same rule as `sendMessage`: a create that 5xx'd or timed out may
+        // still have created the draft, and a retry would leave a duplicate.
+        // Only a rate rejection is retried. (`updateDraft` / `deleteDraft`
+        // name the draft, so a repeat is harmless and they retry normally.)
+        try await withRetry(maxRetries: 3, retryClientErrors: false, retryServerErrors: false) {
             try await self.meter(self.unitCost.draftsCreate, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/drafts")
 
@@ -973,24 +812,7 @@ public final class GmailAPIClient: Sendable {
 
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailAPIError.invalidResponse
-            }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-            // body's reason tells it apart from a real permission refusal.
-            if httpResponse.statusCode == 403 {
-                throw self.gmailError(from: httpResponse, body: data, call: "createDraft")
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                self.logger.error("Gmail drafts.create failed with HTTP \(httpResponse.statusCode)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(response, body: data, call: "createDraft")
 
             return try JSONDecoder().decode(DraftResponse.self, from: data)
         }
@@ -1023,24 +845,7 @@ public final class GmailAPIClient: Sendable {
 
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw GmailAPIError.invalidResponse
-            }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            // Gmail reports per-user RATE LIMITING as 403, not 429 — only the
-            // body's reason tells it apart from a real permission refusal.
-            if httpResponse.statusCode == 403 {
-                throw self.gmailError(from: httpResponse, body: data, call: "updateDraft")
-            }
-
-            guard (200...299).contains(httpResponse.statusCode) else {
-                self.logger.error("Gmail drafts.update failed with HTTP \(httpResponse.statusCode) for draft \(draftId)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(response, body: data, call: "updateDraft")
 
             return try JSONDecoder().decode(DraftResponse.self, from: data)
         }
@@ -1060,14 +865,10 @@ public final class GmailAPIClient: Sendable {
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
             request.timeoutInterval = 30
 
-            let (_, response) = try await self.send(request, quotaKey: quotaKey)
+            let (data, response) = try await self.send(request, quotaKey: quotaKey)
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw GmailAPIError.invalidResponse
-            }
-
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
             }
 
             // Idempotent: 404/410 means the draft is already gone (sent, or
@@ -1080,10 +881,7 @@ public final class GmailAPIClient: Sendable {
                 return
             }
 
-            guard (200...299).contains(httpResponse.statusCode) else {
-                self.logger.error("Gmail drafts.delete failed with HTTP \(httpResponse.statusCode) for draft \(draftId)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(httpResponse, body: data, call: "drafts.delete")
         }
 
         logger.info("Deleted draft \(draftId)")
@@ -1108,6 +906,21 @@ public final class GmailAPIClient: Sendable {
 
     // MARK: - Error classification
 
+    /// The one gate every single-call response passes through: a 2xx is
+    /// returned, anything else is thrown as `gmailError(from:body:call:)`
+    /// classifies it. Endpoint-specific statuses (history's 404, a deleted
+    /// draft's 404/410) are handled by the caller BEFORE this.
+    @discardableResult
+    func checkedResponse(_ response: URLResponse, body: Data, call: String) throws -> HTTPURLResponse {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GmailAPIError.invalidResponse
+        }
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw gmailError(from: httpResponse, body: body, call: call)
+        }
+        return httpResponse
+    }
+
     /// Translate a failing HTTP response into a typed error, disambiguating
     /// Gmail's 403.
     ///
@@ -1115,32 +928,54 @@ public final class GmailAPIClient: Sendable {
     /// `usageLimits` reason, a real refusal as 403 with
     /// `insufficientPermissions`/`forbidden`. Only the body separates them, and
     /// treating a rate signal as permanent is what lost 44% of a year's mail
-    /// (t-172bfc74). A rate reason becomes `.rateLimitExceeded`, which
-    /// `withRetry` already knows is transient and worth the longer backoff.
+    /// (t-172bfc74). So:
+    /// - 403/429 with the DAILY reason (`dailyLimitExceeded`)
+    ///   → `.quotaExceeded`, which `withRetry` does NOT retry — it will not
+    ///   clear within a backoff.
+    /// - 403 with a rate reason → `.rateLimitExceeded` (transient, longer
+    ///   backoff).
+    /// - everything else (401, 404, 429, 5xx, a refusal 403) → `.httpError`
+    ///   with the parsed `detail` (nil when the body said nothing usable);
+    ///   `withRetry` judges it by status.
     func gmailError(from response: HTTPURLResponse, body: Data, call: String) -> GmailAPIError {
-        if response.statusCode == 403 {
-            let classification = GmailErrorClassification.classify(body: body)
-            logger.warning("Gmail \(call, privacy: .public) HTTP 403 (\(classification.reason ?? "no reason", privacy: .public))")
-            if classification.isRateLimit { return .rateLimitExceeded }
+        let status = response.statusCode
+        let classification = GmailErrorClassification.classify(body: body)
+        let reason = classification.reason ?? "no reason"
+        if status == 403 || status == 429 {
+            logger.warning("Gmail \(call, privacy: .public) HTTP \(status, privacy: .public) (\(reason, privacy: .public))")
+            if classification.isDailyLimit { return .quotaExceeded }
+            if status == 403 && classification.isRateLimit { return .rateLimitExceeded }
+        } else {
+            logger.error("Gmail \(call, privacy: .public) failed with HTTP \(status, privacy: .public) (\(reason, privacy: .public))")
         }
-        return .httpError(statusCode: response.statusCode)
+        let retryAfter = Self.retryAfter(from: response)
+        guard classification.reason != nil || classification.message != nil || retryAfter != nil else {
+            return .httpError(statusCode: status)
+        }
+        let detail = GmailErrorDetail(
+            reason: classification.reason, message: classification.message, retryAfter: retryAfter
+        )
+        return .httpError(statusCode: status, detail: detail)
     }
 
     // MARK: - Retry
 
-    /// Retry helper with exponential backoff. Retries 5xx, 429, and transient
-    /// network errors. Rate-limit errors get a longer base delay.
+    /// Retry helper with exponential backoff. Retries 5xx, 429,
+    /// `.rateLimitExceeded`, and transient network errors; never
+    /// `.quotaExceeded` (the day's quota) or any other 4xx. Rate-limit errors
+    /// get a longer base delay. Backoff waits go through the quota bucket's
+    /// sleeper, so a test with a virtual-clock bucket does not really sleep.
     /// - Parameter retryClientErrors: retry client-side transport failures
-    ///   (URLSession timeout / connection-lost). Safe for IDEMPOTENT GETs, but
-    ///   DANGEROUS for a non-idempotent write like `messages.send`: a client
-    ///   timeout is ambiguous (the server may have already accepted the send),
-    ///   so retrying risks a DOUBLE-SEND. Send passes `false` → a client timeout
-    ///   surfaces as a failure after one attempt (~60s) instead of ~3 minutes of
-    ///   re-POSTing. 5xx/429 stay retryable regardless: those are server-side
-    ///   rejections (the message was NOT accepted), so a retry can't duplicate.
-    /// Internal (not private) so the retry semantics — especially the
-    /// non-retryable client-timeout contract for `messages.send` — can be
-    /// unit-tested directly (`@testable`).
+    ///   (URLSession timeout / connection-lost). Safe for IDEMPOTENT calls,
+    ///   but DANGEROUS for a non-idempotent write like `messages.send`: a
+    ///   client timeout is ambiguous (the server may have already accepted
+    ///   it), so retrying risks a DOUBLE-SEND.
+    /// - Parameter retryServerErrors: retry a 5xx. False for the same writes,
+    ///   for the same reason: Gmail can answer 5xx after accepting. Only a
+    ///   rate rejection (429 / rate-reason 403) is proof the request was
+    ///   refused before acceptance, so only that is retried for them.
+    /// Internal (not private) so the retry semantics can be unit-tested
+    /// directly (`@testable`).
     /// - Parameter rateLimitFloor: minimum base delay applied to a RATE-LIMIT
     ///   retry. Defaults to 5s for callers that do their own pacing nowhere
     ///   else. The batch path passes 0: `GmailQuotaBucket` has already parked
@@ -1151,6 +986,7 @@ public final class GmailAPIClient: Sendable {
         baseDelay: TimeInterval = 1.0,
         rateLimitFloor: TimeInterval = 5.0,
         retryClientErrors: Bool = true,
+        retryServerErrors: Bool = true,
         operation: @escaping () async throws -> T
     ) async throws -> T {
         var currentRetry = 0
@@ -1165,10 +1001,10 @@ public final class GmailAPIClient: Sendable {
                 let isRateLimit: Bool
                 if let gmailError = error as? GmailAPIError {
                     switch gmailError {
-                    case .httpError(let statusCode):
-                        isTransient = (500...599).contains(statusCode) || statusCode == 429
+                    case .httpError(let statusCode, _):
+                        isTransient = (retryServerErrors && (500...599).contains(statusCode)) || statusCode == 429
                         isRateLimit = statusCode == 429
-                    case .rateLimitExceeded, .quotaExceeded:
+                    case .rateLimitExceeded:
                         isTransient = true
                         isRateLimit = true
                     default:
@@ -1190,16 +1026,24 @@ public final class GmailAPIClient: Sendable {
                 let effectiveBase = isRateLimit ? max(baseDelay, rateLimitFloor) : baseDelay
                 let delay = effectiveBase * pow(2.0, Double(currentRetry - 1))
                 let cause: String
-                if let gmailError = error as? GmailAPIError, case .httpError(let code) = gmailError {
+                if let gmailError = error as? GmailAPIError, case .httpError(let code, _) = gmailError {
                     cause = "HTTP \(code)"
                 } else {
                     cause = String(describing: error)
                 }
                 logger.warning("Transient \(cause, privacy: .public), retrying in \(String(format: "%.1f", delay))s (attempt \(currentRetry)/\(maxRetries))")
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                if delay > 0 { try await quotaBucket.sleeper(delay) }
             }
         }
     }
+}
+
+/// Counts attempts of a `withRetry` closure. Attempts run one after another,
+/// never concurrently; the lock only satisfies `Sendable`.
+private final class AttemptCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func next() -> Int { lock.withLock { count += 1; return count } }
 }
 
 // MARK: - Array Chunking Extension

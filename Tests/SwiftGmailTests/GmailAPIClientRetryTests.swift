@@ -4,8 +4,8 @@ import Testing
 
 /// The retry contract for the NON-idempotent `messages.send` (t-babda0ef): a
 /// client-side timeout must NOT trigger a re-POST (the server may have accepted
-/// the first attempt → double-send), while server-side rejections (5xx/429)
-/// stay retryable. Exercises `GmailAPIClient.withRetry` directly with a
+/// the first attempt → double-send), and neither may a 5xx (Gmail can answer
+/// one after accepting); only a rate rejection stays retryable. Exercises `GmailAPIClient.withRetry` directly with a
 /// counting operation.
 @Suite("GmailAPIClient.withRetry — messages.send non-idempotent retry contract")
 struct GmailAPIClientRetryTests {
@@ -46,17 +46,30 @@ struct GmailAPIClientRetryTests {
         #expect(attempts.value == 3)   // 1 + 2 retries
     }
 
-    @Test("send contract: a 5xx still retries even with retryClientErrors=false (server rejected → no double-send)")
-    func serverErrorRetriedRegardless() async throws {
+    @Test("send contract: a 5xx does NOT retry with retryServerErrors=false — exactly one attempt")
+    func serverErrorNotRetriedForSend() async throws {
         let client = GmailAPIClient(quotaBucket: GmailQuotaBucket())
         let attempts = Counter()
         await #expect(throws: (any Error).self) {
-            try await client.withRetry(maxRetries: 2, baseDelay: 0, retryClientErrors: false) {
+            try await client.withRetry(maxRetries: 2, baseDelay: 0, retryClientErrors: false, retryServerErrors: false) {
                 attempts.bump()
                 throw GmailAPIError.httpError(statusCode: 503)
             }
         }
-        #expect(attempts.value == 3)   // 5xx is a server-side rejection → safe to retry
+        #expect(attempts.value == 1)   // a 5xx may follow acceptance → no re-POST
+    }
+
+    @Test("GET contract: a 5xx retries by default — maxRetries+1 attempts")
+    func serverErrorRetriedForIdempotentCalls() async throws {
+        let client = GmailAPIClient(quotaBucket: GmailQuotaBucket())
+        let attempts = Counter()
+        await #expect(throws: (any Error).self) {
+            try await client.withRetry(maxRetries: 2, baseDelay: 0) {
+                attempts.bump()
+                throw GmailAPIError.httpError(statusCode: 503)
+            }
+        }
+        #expect(attempts.value == 3)
     }
 
     @Test("send contract: a 4xx (400 malformed) fails fast — exactly one attempt")

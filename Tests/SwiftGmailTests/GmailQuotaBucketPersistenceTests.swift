@@ -439,18 +439,33 @@ struct GmailQuotaBucketPersistedStateTests {
 @Suite("GmailAPIClient.send — in-flight tracking and single-call rate signals")
 struct GmailAPIClientSendQuotaTests {
 
-    private static func response(_ status: Int, _ body: String = "{}") -> (Data, URLResponse) {
+    fileprivate static func response(_ status: Int, _ body: String = "{}") -> (Data, URLResponse) {
         let url = URL(string: "https://gmail.googleapis.com/gmail/v1/users/me/profile")!
         return (Data(body.utf8), HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!)
     }
 
+    /// Answers `first` once, then a 200 with `then` — the call now retries a
+    /// rate signal, so the second answer lets it finish (t-de5eebfb's check is
+    /// that the ONE signal reached the bucket).
+    private final class OnceThen: @unchecked Sendable {
+        private let lock = NSLock()
+        private var sent = false
+        let first: (Int, String)
+        let then: String
+        init(_ first: (Int, String), then: String) { self.first = first; self.then = then }
+        func next() -> (Data, URLResponse) {
+            let isFirst = lock.withLock { defer { sent = true }; return !sent }
+            return isFirst ? GmailAPIClientSendQuotaTests.response(first.0, first.1) : GmailAPIClientSendQuotaTests.response(200, then)
+        }
+    }
+
     @Test("A single-call 429 halves the account's rate")
     func singleCall429FeedsTheBucket() async throws {
-        let bucket = GmailQuotaBucket()
-        let client = GmailAPIClient(quotaBucket: bucket) { _ in Self.response(429) }
-        await #expect(throws: (any Error).self) {
-            _ = try await client.getProfile(accessToken: "t", quotaKey: "single-429")
-        }
+        let bucket = GmailQuotaBucket(sleeper: { _ in })
+        let profile = #"{"emailAddress":"a@b.c","messagesTotal":1,"threadsTotal":1,"historyId":"1"}"#
+        let script = OnceThen((429, "{}"), then: profile)
+        let client = GmailAPIClient(quotaBucket: bucket) { _ in script.next() }
+        _ = try await client.getProfile(accessToken: "t", quotaKey: "single-429")
         #expect(await bucket.rate(for: "single-429") == GmailQuotaProfile.current.unitsPerSecond / 2)
     }
 
@@ -458,12 +473,11 @@ struct GmailAPIClientSendQuotaTests {
     func singleCall403Classified() async throws {
         let rate403 = #"{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"userRateLimitExceeded"}]}}"#
         let refusal403 = #"{"error":{"code":403,"errors":[{"domain":"global","reason":"insufficientPermissions"}]}}"#
-        let bucket = GmailQuotaBucket()
-        let rateClient = GmailAPIClient(quotaBucket: bucket) { _ in Self.response(403, rate403) }
+        let bucket = GmailQuotaBucket(sleeper: { _ in })
+        let rateScript = OnceThen((403, rate403), then: "{}")
+        let rateClient = GmailAPIClient(quotaBucket: bucket) { _ in rateScript.next() }
         let refusalClient = GmailAPIClient(quotaBucket: bucket) { _ in Self.response(403, refusal403) }
-        await #expect(throws: (any Error).self) {
-            _ = try await rateClient.listMessages(accessToken: "t", query: "x", quotaKey: "single-403")
-        }
+        _ = try await rateClient.listMessages(accessToken: "t", query: "x", quotaKey: "single-403")
         await #expect(throws: (any Error).self) {
             _ = try await refusalClient.listMessages(accessToken: "t", query: "x", quotaKey: "refusal-403")
         }

@@ -268,10 +268,35 @@ public enum MessageFormat: String, Sendable {
     case raw        // Raw RFC 2822 format
 }
 
-public enum GmailAPIError: Error, LocalizedError {
+/// What Gmail said about a failing request, parsed from its JSON error body
+/// and headers. Every field is optional: a proxy's HTML page or an empty body
+/// yields a detail with nothing in it rather than no error at all.
+public struct GmailErrorDetail: Sendable, Equatable, Hashable {
+    /// `error.errors[0].reason` (e.g. `insufficientPermissions`,
+    /// `userRateLimitExceeded`), else `error.status` (e.g. `PERMISSION_DENIED`).
+    public let reason: String?
+    /// `error.message`, Gmail's human-readable explanation.
+    public let message: String?
+    /// The `Retry-After` header, seconds form only.
+    public let retryAfter: TimeInterval?
+
+    public init(reason: String? = nil, message: String? = nil, retryAfter: TimeInterval? = nil) {
+        self.reason = reason
+        self.message = message
+        self.retryAfter = retryAfter
+    }
+}
+
+public enum GmailAPIError: Error, LocalizedError, Equatable {
     case invalidResponse
-    case httpError(statusCode: Int)
+    /// A non-2xx response that no more specific case covers. `detail` is nil
+    /// only when the error was not built from a response.
+    case httpError(statusCode: Int, detail: GmailErrorDetail? = nil)
+    /// Per-user RATE limit (429, or a 403 with a rate reason). Transient —
+    /// `withRetry` backs off and retries it.
     case rateLimitExceeded
+    /// The DAILY / project quota is spent (`dailyLimitExceeded`,
+    /// `quotaExceeded`). Not retried: it will not clear within a backoff.
     case quotaExceeded
     case historyIdExpired
     case parsingError
@@ -285,12 +310,15 @@ public enum GmailAPIError: Error, LocalizedError {
         switch self {
         case .invalidResponse:
             return "Invalid response from Gmail API"
-        case .httpError(let statusCode):
+        case .httpError(let statusCode, let detail):
+            if let reason = detail?.reason {
+                return "Gmail API error (HTTP \(statusCode), \(reason))"
+            }
             return "Gmail API error (HTTP \(statusCode))"
         case .rateLimitExceeded:
             return "Gmail API rate limit exceeded"
         case .quotaExceeded:
-            return "Gmail API quota exceeded"
+            return "Gmail API daily quota exceeded"
         case .historyIdExpired:
             return "Gmail historyId expired - full sync required"
         case .parsingError:
@@ -345,8 +373,14 @@ struct GmailErrorClassification: Sendable {
     /// The first `error.errors[].reason`, else `error.status`, else nil.
     /// Safe to log `.public` — it is a fixed enum-ish token, never content.
     let reason: String?
+    /// `error.message`, when present.
+    var message: String? = nil
     /// True when the failure is Gmail saying "too fast / out of quota".
     let isRateLimit: Bool
+    /// True when the reason is the DAILY / project quota rather than the
+    /// per-user rate. A subset of `isRateLimit` (the bucket still backs off),
+    /// but a caller must not retry it within the hour.
+    var isDailyLimit: Bool = false
 
     /// Reason tokens Gmail uses for rate/quota exhaustion. All four arrive as
     /// HTTP 403 (`rateLimitExceeded` also arrives as 429).
@@ -356,6 +390,12 @@ struct GmailErrorClassification: Sendable {
         "quotaexceeded",
         "dailylimitexceeded"
     ]
+
+    /// The subset of `rateReasons` that means the day's quota is gone.
+    /// `quotaExceeded` (like `RESOURCE_EXHAUSTED`) is deliberately NOT here:
+    /// across Google APIs it usually names a per-minute or concurrency quota,
+    /// which clears within a backoff.
+    static let dailyReasons: Set<String> = ["dailylimitexceeded"]
 
     /// gRPC-style status that means the same thing.
     static let rateStatuses: Set<String> = ["resource_exhausted"]
@@ -377,7 +417,9 @@ struct GmailErrorClassification: Sendable {
 
         return GmailErrorClassification(
             reason: reasons.first ?? payload.status,
-            isRateLimit: isRateReason || isRateStatus
+            message: payload.message,
+            isRateLimit: isRateReason || isRateStatus,
+            isDailyLimit: reasons.contains { dailyReasons.contains($0.lowercased()) }
         )
     }
 }

@@ -402,30 +402,21 @@ extension GmailAPIClient {
                 return BatchResponse(parts: [], token: accessToken, envelopeUnauthorized: true)
             }
 
-            if (500...599).contains(httpResponse.statusCode) || httpResponse.statusCode == 429 {
-                if httpResponse.statusCode == 429 {
+            // An ENVELOPE-level 403 is the same ambiguity as a per-part one,
+            // so it goes through the shared classifier: a rate reason becomes
+            // `.rateLimitExceeded` (transient, already given the longer
+            // backoff), a daily reason `.quotaExceeded` (not retried), anything
+            // else a plain 403 that escapes on the first attempt. Rate signals
+            // are reported here because this request opted out of `send`'s.
+            if (500...599).contains(httpResponse.statusCode)
+                || httpResponse.statusCode == 429 || httpResponse.statusCode == 403 {
+                let error = self.gmailError(from: httpResponse, body: data, call: "batch \(resource).get envelope")
+                if httpResponse.statusCode == 429 || error == .rateLimitExceeded || error == .quotaExceeded {
                     await self.quotaBucket.noteRateLimited(
                         key: quotaKey, retryAfter: Self.retryAfter(from: httpResponse)
                     )
                 }
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
-
-            // An ENVELOPE-level 403 is the same ambiguity as a per-part one.
-            // `withRetry` classifies by error case, not by body, so translate
-            // here: a rate reason becomes `.rateLimitExceeded` (transient, and
-            // already given the longer rate-limit backoff), anything else stays
-            // a plain 403 and escapes on the first attempt.
-            if httpResponse.statusCode == 403 {
-                let classification = GmailErrorClassification.classify(body: data)
-                logger.warning("Gmail batch \(resource, privacy: .public).get envelope HTTP 403 (\(classification.reason ?? "no reason", privacy: .public))")
-                if classification.isRateLimit {
-                    await self.quotaBucket.noteRateLimited(
-                        key: quotaKey, retryAfter: Self.retryAfter(from: httpResponse)
-                    )
-                    throw GmailAPIError.rateLimitExceeded
-                }
-                throw GmailAPIError.httpError(statusCode: 403)
+                throw error
             }
 
             // The endpoint (or a proxy in front of it) doesn't speak batch —
@@ -434,10 +425,7 @@ extension GmailAPIClient {
                 throw GmailBatchUnsupported(reason: "batch endpoint returned HTTP \(httpResponse.statusCode)")
             }
 
-            guard (200...299).contains(httpResponse.statusCode) else {
-                logger.warning("Gmail batch \(resource, privacy: .public).get envelope failed with HTTP \(httpResponse.statusCode, privacy: .public)")
-                throw GmailAPIError.httpError(statusCode: httpResponse.statusCode)
-            }
+            try self.checkedResponse(httpResponse, body: data, call: "batch \(resource).get envelope")
 
             let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
             guard let boundaryOut = GmailBatchProtocol.boundary(fromContentType: contentType) else {
@@ -548,16 +536,18 @@ extension GmailAPIClient {
                         } catch let error where tokenSource.credentialErrors.recognises(error) {
                             logger.warning("messages.get auth failure for \(id, privacy: .public) — reported as leftover")
                             return .authFailed(id, error)
-                        } catch GmailAPIError.httpError(let statusCode) where statusCode == 404 {
+                        } catch GmailAPIError.httpError(let statusCode, _) where statusCode == 404 {
                             logger.info("messages.get 404 for \(id, privacy: .public) — message deleted server-side, skipping")
                             return .notFound(id)
-                        } catch GmailAPIError.rateLimitExceeded {
+                        } catch GmailAPIError.rateLimitExceeded, GmailAPIError.quotaExceeded {
+                            // The daily quota is owed too, not dropped: the
+                            // ids are fine, the day's budget is not.
                             logger.warning("messages.get rate-limited for \(id, privacy: .public) — reported as leftover")
                             return .rateLimited(id)
-                        } catch GmailAPIError.httpError(let statusCode) where statusCode == 429 {
+                        } catch GmailAPIError.httpError(let statusCode, _) where statusCode == 429 {
                             logger.warning("messages.get HTTP 429 for \(id, privacy: .public) — reported as leftover")
                             return .rateLimited(id)
-                        } catch GmailAPIError.httpError(let statusCode) where statusCode == 401 {
+                        } catch GmailAPIError.httpError(let statusCode, _) where statusCode == 401 {
                             // A `.fixed` token that cannot be refreshed: owed,
                             // not dropped, and flagged like the batch path does.
                             logger.warning("messages.get HTTP 401 for \(id, privacy: .public) — reported as leftover")
