@@ -305,7 +305,8 @@ public enum GmailAPIError: Error, LocalizedError, Equatable {
     /// not the rate — is the problem. Hosts can substitute their own error
     /// through `GmailCredentialErrors`.
     case authenticationFailed(String)
-    /// The call's `GmailRetryPolicy.maxElapsed` budget would run out before
+    /// The call's deadline — the earliest of `GmailRetryPolicy.maxElapsed`,
+    /// `GmailRetryPolicy.deadline` and any outer scope's — would pass before
     /// the quota bucket let the request go. Thrown BEFORE the request is sent,
     /// with nothing debited. `retryAfter` is how long until the bucket would
     /// let this key go (the remaining park), or nil when not known — a host

@@ -47,7 +47,7 @@ public final class GmailAPIClient: Sendable {
 
     /// The policy in force for this call: the task-local override if one is
     /// set, otherwise the client's.
-    var effectiveRetryPolicy: GmailRetryPolicy { GmailRetryPolicy.override ?? retryPolicy }
+    public var effectiveRetryPolicy: GmailRetryPolicy { GmailRetryPolicy.override ?? retryPolicy }
 
     /// Quota bucket for callers that don't know (or don't care) which account
     /// they are spending against — one-off profile lookups during account
@@ -1072,19 +1072,17 @@ public final class GmailAPIClient: Sendable {
         }
     }
 
-    /// Run `body` under `policy`'s deadline: now + `maxElapsed` on the
-    /// bucket's clock, or an outer call's deadline if that is sooner. The
+    /// Run `body` under `policy`'s deadline: the earliest of now +
+    /// `maxElapsed` on the bucket's clock, `policy.deadline`, and an outer
+    /// call's deadline. The
     /// deadline is published as `GmailRetryPolicy.activeDeadline`, which the
     /// quota bucket's `consume` reads, so every meter inside honours it.
     func withDeadlineScope<T>(
         _ policy: GmailRetryPolicy,
         _ body: (Date?) async throws -> T
     ) async throws -> T {
-        let own = policy.maxElapsed.map { quotaBucket.now().addingTimeInterval($0) }
-        let deadline: Date? = switch (GmailRetryPolicy.activeDeadline, own) {
-        case let (outer?, own?): min(outer, own)
-        case let (outer, own): outer ?? own
-        }
+        let elapsedCap = policy.maxElapsed.map { quotaBucket.now().addingTimeInterval($0) }
+        let deadline = [GmailRetryPolicy.activeDeadline, elapsedCap, policy.deadline].compactMap(\.self).min()
         return try await GmailRetryPolicy.$activeDeadline.withValue(deadline) {
             try await body(deadline)
         }

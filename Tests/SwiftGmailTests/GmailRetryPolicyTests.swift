@@ -257,6 +257,99 @@ struct GmailRetryPolicyTests {
         #expect(clock.elapsed >= 60)
     }
 
+    // MARK: - Shared deadline
+
+    @Test("failFast(until:) shares one budget across calls; failFast(within:) restarts it per call")
+    func sharedDeadlineAcrossCalls() async throws {
+        // Two runs: the shared deadline refuses the second call's park, the
+        // per-call budget lets it through.
+        for shared in [true, false] {
+            let clock = VirtualClock()
+            let bucket = clock.bucket()
+            await bucket.noteRateLimited(key: "second")   // parked until origin + 60
+            clock.advance(35)
+            let start = clock.now                        // the park has 25 s left
+            // The first call takes 15 s on the wire; later ones are instant.
+            let slow = CountingTransport(reply: { index, _ in
+                if index == 0 { clock.advance(15) }
+                return (status: 200, headers: [:], body: #"{"id":"m1","threadId":"t","snippet":"","internalDate":"0"}"#)
+            })
+            let client = GmailAPIClient(quotaBucket: bucket, transport: { slow.respond(to: $0) })
+            let policy: GmailRetryPolicy = shared ? .failFast(until: start.addingTimeInterval(20)) : .failFast(within: 20)
+            try await GmailRetryPolicy.with(policy) {
+                try await Self.getMessage(client, key: "first")
+                #expect(clock.now == start.addingTimeInterval(15))
+                if shared {
+                    // 5 s left of the pass, a 10 s park: refused.
+                    await #expect(throws: GmailAPIError.deadlineExceeded(retryAfter: 10)) {
+                        try await Self.getMessage(client, key: "second")
+                    }
+                } else {
+                    try await Self.getMessage(client, key: "second")
+                }
+            }
+            #expect(slow.attempts == (shared ? 1 : 2))
+        }
+    }
+
+    @Test("Nested with: the earliest deadline wins, from deadline or from maxElapsed")
+    func nestedEarliestDeadlineWins() async throws {
+        let clock = VirtualClock()
+        let bucket = clock.bucket()
+        let client = GmailAPIClient(quotaBucket: bucket, transport: { CountingTransport().respond(to: $0) })
+        let origin = clock.now
+        func observed() async throws -> Date? {
+            try await client.withDeadlineScope(client.effectiveRetryPolicy) { $0 }
+        }
+        // Outer absolute deadline sooner than the inner maxElapsed.
+        try await GmailRetryPolicy.with(.failFast(until: origin.addingTimeInterval(5))) {
+            try await client.withDeadlineScope(client.effectiveRetryPolicy) { _ in
+                try await GmailRetryPolicy.with(.failFast(within: 30)) {
+                    let observedDeadline = try await observed()
+                    #expect(observedDeadline == origin.addingTimeInterval(5))
+                }
+            }
+        }
+        // Outer maxElapsed sooner than the inner absolute deadline.
+        try await GmailRetryPolicy.with(.failFast(within: 5)) {
+            try await client.withDeadlineScope(client.effectiveRetryPolicy) { _ in
+                try await GmailRetryPolicy.with(.failFast(until: origin.addingTimeInterval(30))) {
+                    let observedDeadline = try await observed()
+                    #expect(observedDeadline == origin.addingTimeInterval(5))
+                }
+            }
+        }
+        // Inner absolute deadline sooner than the outer maxElapsed.
+        try await GmailRetryPolicy.with(.failFast(within: 30)) {
+            try await client.withDeadlineScope(client.effectiveRetryPolicy) { _ in
+                try await GmailRetryPolicy.with(.failFast(until: origin.addingTimeInterval(5))) {
+                    let observedDeadline = try await observed()
+                    #expect(observedDeadline == origin.addingTimeInterval(5))
+                }
+            }
+        }
+        // One policy with both: the earlier of the two.
+        let both = GmailRetryPolicy(maxElapsed: 8, deadline: origin.addingTimeInterval(3))
+        try await GmailRetryPolicy.with(both) {
+            let observedDeadline = try await observed()
+            #expect(observedDeadline == origin.addingTimeInterval(3))
+        }
+        let both2 = GmailRetryPolicy(maxElapsed: 2, deadline: origin.addingTimeInterval(3))
+        try await GmailRetryPolicy.with(both2) {
+            let observedDeadline = try await observed()
+            #expect(observedDeadline == origin.addingTimeInterval(2))
+        }
+    }
+
+    @Test("deadline defaults to nil and takes part in equality")
+    func deadlineDefaultAndEquality() {
+        let date = VirtualClock.origin
+        #expect(GmailRetryPolicy.default.deadline == nil)
+        #expect(GmailRetryPolicy.failFast(until: date) == GmailRetryPolicy(retryOnRateLimit: false, deadline: date))
+        #expect(GmailRetryPolicy.failFast(until: date) != GmailRetryPolicy.failFast(until: date.addingTimeInterval(1)))
+        #expect(GmailRetryPolicy.failFast(until: date).maxElapsed == nil)
+    }
+
     // MARK: - Task-local override
 
     @Test("GmailRetryPolicy.with beats the client's policy, and nesting restores the outer one")
@@ -276,6 +369,25 @@ struct GmailRetryPolicyTests {
         }
         #expect(attempts.attempts == 2)
         #expect(client.effectiveRetryPolicy.maxAttempts == 7, "unset again: the client's own")
+    }
+
+    @Test("current is nil outside any with, set inside, and restored after nesting")
+    func currentReflectsOverride() async {
+        #expect(GmailRetryPolicy.current == nil)
+        let client = Self.client(CountingTransport(), policy: GmailRetryPolicy(maxAttempts: 7))
+        let outer = GmailRetryPolicy(maxAttempts: 2)
+        let inner = GmailRetryPolicy.failFast(until: VirtualClock.origin)
+        await GmailRetryPolicy.with(outer) {
+            #expect(GmailRetryPolicy.current == outer)
+            #expect(client.effectiveRetryPolicy == outer)
+            await GmailRetryPolicy.with(inner) {
+                #expect(GmailRetryPolicy.current == inner)
+                #expect(client.effectiveRetryPolicy == inner)
+            }
+            #expect(GmailRetryPolicy.current == outer)
+        }
+        #expect(GmailRetryPolicy.current == nil)
+        #expect(client.effectiveRetryPolicy == GmailRetryPolicy(maxAttempts: 7))
     }
 
     // MARK: - Cancellation

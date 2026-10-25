@@ -178,6 +178,26 @@ A backoff that would pass it is not slept either: the last attempt's own error
 is thrown, since that is the one worth acting on. A batch fetch whose re-issue
 round runs out of time returns the remaining ids as leftovers.
 
+`maxElapsed` applies per call: each call starts its own budget. To give a
+multi-call pass (a sync of several pages, a refresh touching several
+endpoints) one shared budget, set `deadline`, an absolute `Date` on the quota
+bucket's clock, or use `.failFast(until:)`:
+
+```swift
+let cutoff = Date().addingTimeInterval(20)
+try await GmailRetryPolicy.with(.failFast(until: cutoff)) {
+    try await syncLabels()     // if this takes 15 s...
+    try await syncMessages()   // ...this has 5 s left, not a fresh 20 s
+}
+```
+
+A call's deadline is the earliest of now + `maxElapsed`, the policy's
+`deadline`, and that of any bounded call it is nested in, so nesting never
+extends a budget. `GmailRetryPolicy.current` returns the override set by
+`with(...)`, or nil outside one; `client.effectiveRetryPolicy` is the policy
+a call on that client would use right now (the override if set, otherwise
+the client's own).
+
 `sendMessage` and `createDraft` are not idempotent. They retry only a 429 or a
 rate-limit 403, which Gmail returns before accepting the request. A 5xx or a
 timeout fails after one attempt, because Gmail may already have accepted the
@@ -193,6 +213,13 @@ included), rate and quota refusals, `.deadlineExceeded`, and connection
 failures that never reached Gmail. It cannot recognise your own auth error
 (the one your `GmailCredentialErrors` reports), so check for that first: a
 dead credential means nothing was sent.
+
+## 0.3.1
+
+Additive only; nothing to change when upgrading from 0.3.0.
+`GmailRetryPolicy` gains `deadline` (a defaulted last init parameter) and
+`failFast(until:)`; `GmailRetryPolicy.current` and
+`GmailAPIClient.effectiveRetryPolicy` are now public.
 
 ## Upgrading from 0.2.0
 
