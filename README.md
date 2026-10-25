@@ -193,7 +193,14 @@ try await GmailRetryPolicy.with(.failFast(until: cutoff)) {
 
 A call's deadline is the earliest of now + `maxElapsed`, the policy's
 `deadline`, and that of any bounded call it is nested in, so nesting never
-extends a budget. `GmailRetryPolicy.current` returns the override set by
+extends a budget. `with(...)` itself REPLACES the outer override rather than
+intersecting with it: inside `with(.default)` an outer `with`'s deadline no
+longer applies. That is the way to run spawned work with no budget of its
+own (and why a helper that wraps its own `with` can widen its caller's).
+
+A rate limit surfaces as `.rateLimitExceeded` (rate-reason 403) or as
+`.httpError(429, _)` once a 429's retries run out; match both with
+`GmailAPIError.isRateLimit(error)`. `GmailRetryPolicy.current` returns the override set by
 `with(...)`, or nil outside one; `client.effectiveRetryPolicy` is the policy
 a call on that client would use right now (the override if set, otherwise
 the client's own).
@@ -213,6 +220,11 @@ included), rate and quota refusals, `.deadlineExceeded`, and connection
 failures that never reached Gmail. It cannot recognise your own auth error
 (the one your `GmailCredentialErrors` reports), so check for that first: a
 dead credential means nothing was sent.
+
+## 0.3.2
+
+Additive only: `GmailAPIError.isRateLimit(_:)`, and documentation that a
+nested `GmailRetryPolicy.with` replaces (not intersects) the outer policy.
 
 ## 0.3.1
 

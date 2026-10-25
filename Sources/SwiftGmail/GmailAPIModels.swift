@@ -342,6 +342,19 @@ public enum GmailAPIError: Error, LocalizedError, Equatable {
         }
     }
 
+    /// Was `error` Gmail's per-user RATE limit? Covers both shapes a rate
+    /// signal surfaces as: `.rateLimitExceeded` (a rate-reason 403) and
+    /// `.httpError(429, _)` (a 429 whose retries ran out, including a
+    /// `/batch` envelope's). False for `.quotaExceeded` — the daily limit is
+    /// not a slow-down signal — and for `.deadlineExceeded`.
+    public static func isRateLimit(_ error: any Error) -> Bool {
+        switch error as? GmailAPIError {
+        case .rateLimitExceeded: return true
+        case .httpError(let statusCode, _): return statusCode == 429
+        default: return false
+        }
+    }
+
     /// Might Gmail have ACCEPTED the non-idempotent request (`sendMessage`,
     /// `createDraft`) that threw `error`? Auto-retry a send only when this
     /// returns false; on true, check (Sent folder, drafts list) or ask.

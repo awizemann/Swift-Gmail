@@ -257,6 +257,37 @@ struct GmailRetryPolicyTests {
         #expect(clock.elapsed >= 60)
     }
 
+    @Test("A nested with(.default) replaces the outer budget: spawned work runs unbounded")
+    func nestedDefaultClearsOuterDeadline() async throws {
+        let clock = VirtualClock()
+        let bucket = clock.bucket()
+        await bucket.noteRateLimited(key: "child", retryAfter: 30)
+        let transport = CountingTransport(status: 200)
+        let client = GmailAPIClient(quotaBucket: bucket, transport: { transport.respond(to: $0) })
+        try await GmailRetryPolicy.with(.failFast(until: clock.now.addingTimeInterval(5))) {
+            try await GmailRetryPolicy.with(.default) {
+                try await Self.getMessage(client, key: "child")
+            }
+        }
+        #expect(transport.attempts == 1)
+        #expect(clock.elapsed >= 60)
+    }
+
+    @Test("isRateLimit matches both rate-limit shapes and nothing else",
+          arguments: [
+            (GmailAPIError.rateLimitExceeded as any Error, true),
+            (GmailAPIError.httpError(statusCode: 429), true),
+            (GmailAPIError.httpError(statusCode: 429, detail: GmailErrorDetail(reason: "rateLimitExceeded")), true),
+            (GmailAPIError.httpError(statusCode: 403), false),
+            (GmailAPIError.httpError(statusCode: 503), false),
+            (GmailAPIError.quotaExceeded, false),
+            (GmailAPIError.deadlineExceeded(retryAfter: 10), false),
+            (URLError(.timedOut), false),
+          ])
+    func isRateLimit(error: any Error, expected: Bool) {
+        #expect(GmailAPIError.isRateLimit(error) == expected)
+    }
+
     // MARK: - Shared deadline
 
     @Test("failFast(until:) shares one budget across calls; failFast(within:) restarts it per call")
@@ -292,7 +323,7 @@ struct GmailRetryPolicyTests {
         }
     }
 
-    @Test("Nested with: the earliest deadline wins, from deadline or from maxElapsed")
+    @Test("Inside a bounded call, the earliest deadline wins, from deadline or from maxElapsed")
     func nestedEarliestDeadlineWins() async throws {
         let clock = VirtualClock()
         let bucket = clock.bucket()
