@@ -345,12 +345,24 @@ public enum GmailAPIError: Error, LocalizedError, Equatable {
     /// Was `error` Gmail's per-user RATE limit? Covers both shapes a rate
     /// signal surfaces as: `.rateLimitExceeded` (a rate-reason 403) and
     /// `.httpError(429, _)` (a 429 whose retries ran out, including a
-    /// `/batch` envelope's). False for `.quotaExceeded` — the daily limit is
-    /// not a slow-down signal — and for `.deadlineExceeded`.
+    /// `/batch` envelope's). Also true for an `.httpError` whose `detail.reason`
+    /// is a rate token (the client itself maps those to `.rateLimitExceeded`,
+    /// but a host may build or forward one). The `quotaExceeded` REASON token
+    /// counts (a per-minute quota); the daily limit does not — neither the
+    /// `.quotaExceeded` case nor a `dailyLimitExceeded` reason, even on a 429.
+    /// False for `.deadlineExceeded`.
     public static func isRateLimit(_ error: any Error) -> Bool {
         switch error as? GmailAPIError {
         case .rateLimitExceeded: return true
-        case .httpError(let statusCode, _): return statusCode == 429
+        case .httpError(let statusCode, let detail):
+            let reason = detail?.reason?.lowercased()
+            if let reason, GmailErrorClassification.dailyReasons.contains(reason) { return false }
+            if statusCode == 429 { return true }
+            guard let reason else { return false }
+            let rateTokens = GmailErrorClassification.rateReasons
+                .union(GmailErrorClassification.rateStatuses)
+                .subtracting(GmailErrorClassification.dailyReasons)
+            return rateTokens.contains(reason)
         default: return false
         }
     }

@@ -221,6 +221,12 @@ failures that never reached Gmail. It cannot recognise your own auth error
 (the one your `GmailCredentialErrors` reports), so check for that first: a
 dead credential means nothing was sent.
 
+## 0.3.3
+
+Additive only: `GmailAPIError.isRateLimit(_:)` also recognises an `.httpError`
+whose `detail.reason` is a rate token (not the daily limit), so hosts need no
+copy of the reason list.
+
 ## 0.3.2
 
 Additive only: `GmailAPIError.isRateLimit(_:)`, and documentation that a
