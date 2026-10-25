@@ -33,11 +33,13 @@ import Foundation
 /// | ------------------------ | ----- |
 /// | `getProfile`             |     1 |
 /// | `labels.list`            |     1 |
+/// | `labels.create`          |     5 |
 /// | `history.list`           |     2 |
 /// | `messages.list`          |     5 |
 /// | `messages.modify`        |     5 |
 /// | `messages.untrash`       |     5 |
 /// | `drafts.list`            |     5 |
+/// | `drafts.get`             |     5 |
 /// | `drafts.create`          |    10 |
 /// | `drafts.delete`          |    10 |
 /// | `messages.delete`        |    10 |
@@ -49,6 +51,7 @@ import Foundation
 /// | `threads.get`            |    40 |
 /// | `messages.batchModify`   |    50 |
 /// | `messages.send`          |   100 |
+/// | `drafts.send`            |   100 |
 ///
 /// 🚨 `messages.attachments.get` is **20**, not the 5 the legacy table
 /// documented — an attachment fetch costs as much as a full `messages.get`.
@@ -77,6 +80,9 @@ public struct GmailUnitCost: Sendable {
     public let draftsCreate: Int
     public let draftsUpdate: Int
     public let draftsDelete: Int
+    public let draftsGet: Int
+    public let draftsSend: Int
+    public let labelsCreate: Int
 
     /// The table above, verbatim. Correct for any project created on or after
     /// 2026-05-01.
@@ -98,7 +104,10 @@ public struct GmailUnitCost: Sendable {
         draftsList: 5,
         draftsCreate: 10,
         draftsUpdate: 15,
-        draftsDelete: 10
+        draftsDelete: 10,
+        draftsGet: 5,
+        draftsSend: 100,
+        labelsCreate: 5
     )
 
     /// Pre-2026-05-01 projects. The only documented differences are the two
@@ -123,7 +132,10 @@ public struct GmailUnitCost: Sendable {
         draftsList: 5,
         draftsCreate: 10,
         draftsUpdate: 15,
-        draftsDelete: 10
+        draftsDelete: 10,
+        draftsGet: 5,
+        draftsSend: 100,
+        labelsCreate: 5
     )
 }
 

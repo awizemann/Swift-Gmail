@@ -16,7 +16,23 @@ public final class GmailAPIClient: Sendable {
 
     private let logger = GmailLogging.logger(category: "GmailAPIClient")
 
-    private let baseURL = "https://gmail.googleapis.com/gmail/v1/users/me"
+    /// The API root every request goes to: REST calls use
+    /// `<root>/gmail/v1/users/me/...`, batch envelopes `<root>/batch/gmail/v1`.
+    /// Google's endpoint by default; a host may point it at a proxy or a test
+    /// server.
+    public let baseURL: URL
+
+    /// `<root>/gmail/v1/users/me`, without a trailing slash.
+    var usersBase: String { "\(rootString)/gmail/v1/users/me" }
+
+    /// `<root>/batch/gmail/v1`.
+    var batchURL: String { "\(rootString)/batch/gmail/v1" }
+
+    private var rootString: String {
+        var root = baseURL.absoluteString
+        while root.hasSuffix("/") { root.removeLast() }
+        return root
+    }
 
     /// The quota bucket every metered call debits. Defaults to the
     /// process-wide one so all clients for an account share a budget; tests
@@ -33,16 +49,37 @@ public final class GmailAPIClient: Sendable {
     /// with `GmailRetryPolicy.with(_:operation:)`.
     public let retryPolicy: GmailRetryPolicy
 
-    public init(retryPolicy: GmailRetryPolicy = .default) {
+    public init(
+        retryPolicy: GmailRetryPolicy = .default,
+        baseURL: URL = URL(string: "https://gmail.googleapis.com")!
+    ) {
         self.quotaBucket = .shared
         self.transport = { try await URLSession.shared.data(for: $0) }
         self.retryPolicy = retryPolicy
+        Self.validateRoot(baseURL)
+        self.baseURL = baseURL
     }
 
-    public init(quotaBucket: GmailQuotaBucket, transport: Transport? = nil, retryPolicy: GmailRetryPolicy = .default) {
+    public init(
+        quotaBucket: GmailQuotaBucket,
+        transport: Transport? = nil,
+        retryPolicy: GmailRetryPolicy = .default,
+        baseURL: URL = URL(string: "https://gmail.googleapis.com")!
+    ) {
         self.quotaBucket = quotaBucket
         self.transport = transport ?? { try await URLSession.shared.data(for: $0) }
         self.retryPolicy = retryPolicy
+        Self.validateRoot(baseURL)
+        self.baseURL = baseURL
+    }
+
+    /// A root with a query or fragment cannot be prefixed onto a path, so it
+    /// is a programmer error, caught at init rather than as a malformed URL.
+    private static func validateRoot(_ root: URL) {
+        precondition(
+            root.query == nil && root.fragment == nil,
+            "GmailAPIClient baseURL must not have a query or fragment: \(root.absoluteString)"
+        )
     }
 
     /// The policy in force for this call: the task-local override if one is
@@ -103,6 +140,23 @@ public final class GmailAPIClient: Sendable {
         return url
     }
 
+    /// `id` as ONE path segment: everything outside RFC 3986's unreserved set
+    /// (ASCII letters, digits, `-._~`) is percent-encoded, so `/ ? # %` and
+    /// spaces cannot end the segment or start a query, and an id of `.` or
+    /// `..` is sent as `%2E` / `%2E%2E` so it cannot resolve as a dot-segment.
+    /// A Gmail hex id passes through unchanged. Shared with the batch
+    /// sub-request paths.
+    static func pathSegment(_ id: String) -> String {
+        if id == "." || id == ".." {
+            return String(repeating: "%2E", count: id.count)
+        }
+        return id.addingPercentEncoding(withAllowedCharacters: unreservedCharacters) ?? id
+    }
+
+    private static let unreservedCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+
     private func simpleURL(_ string: String) throws -> URL {
         guard let url = URL(string: string) else {
             throw GmailAPIError.invalidURL
@@ -119,6 +173,7 @@ public final class GmailAPIClient: Sendable {
         maxResults: Int = 100,
         pageToken: String? = nil,
         includeSpamTrash: Bool = false,
+        labelIds: [String]? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> ListMessagesResponse {
         // `includeSpamTrash` defaults to FALSE server-side, and that filter is
@@ -133,11 +188,17 @@ public final class GmailAPIClient: Sendable {
             queryItems.append(URLQueryItem(name: "includeSpamTrash", value: "true"))
         }
 
+        // Repeated `labelIds=` items: Gmail ANDs them (only messages carrying
+        // every listed label).
+        for labelId in labelIds ?? [] {
+            queryItems.append(URLQueryItem(name: "labelIds", value: labelId))
+        }
+
         if let pageToken = pageToken {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
 
-        let url = try apiURL("\(baseURL)/messages", queryItems: queryItems)
+        let url = try apiURL("\(usersBase)/messages", queryItems: queryItems)
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
@@ -153,7 +214,7 @@ public final class GmailAPIClient: Sendable {
     /// minimal message ref). Paginated by the caller via `nextPageToken`.
     /// Full bodies come from a follow-up batched `getMessages` on the
     /// referenced message ids — a draft's underlying message is a real
-    /// message resource, so no separate `drafts.get` is needed.
+    /// message resource (`getDraft` fetches one draft whole).
     public func listDrafts(
         accessToken: String,
         query: String? = nil,
@@ -176,7 +237,7 @@ public final class GmailAPIClient: Sendable {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
 
-        let url = try apiURL("\(baseURL)/drafts", queryItems: queryItems)
+        let url = try apiURL("\(usersBase)/drafts", queryItems: queryItems)
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
@@ -194,7 +255,7 @@ public final class GmailAPIClient: Sendable {
         accessToken: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailProfile {
-        let url = try simpleURL("\(baseURL)/profile")
+        let url = try simpleURL("\(usersBase)/profile")
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
@@ -211,7 +272,7 @@ public final class GmailAPIClient: Sendable {
         accessToken: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> [GmailLabel] {
-        let url = try simpleURL("\(baseURL)/labels")
+        let url = try simpleURL("\(usersBase)/labels")
 
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -226,6 +287,43 @@ public final class GmailAPIClient: Sendable {
         }
     }
 
+    /// Create a user label (`labels.create`, 5 units). Not idempotent — a
+    /// label name is unique, and a create that 5xx'd or timed out may already
+    /// exist — so only a 429 or rate-limit 403 is retried; a 5xx or timeout
+    /// fails after one attempt rather than risk a duplicate (or a 409 that
+    /// hides the success). Visibility values are Gmail's strings
+    /// (`labelShow`, `labelShowIfUnread`, `labelHide`; `show`, `hide`); nil
+    /// leaves them to Gmail's default.
+    public func createLabel(
+        accessToken: String,
+        name: String,
+        labelListVisibility: String? = nil,
+        messageListVisibility: String? = nil,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> GmailLabel {
+        try await withRetry(retryClientErrors: false, retryServerErrors: false) {
+            try await self.meter(self.unitCost.labelsCreate, key: quotaKey)
+            let url = try self.simpleURL("\(self.usersBase)/labels")
+
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.timeoutInterval = 30
+
+            var body: [String: String] = ["name": name]
+            if let labelListVisibility { body["labelListVisibility"] = labelListVisibility }
+            if let messageListVisibility { body["messageListVisibility"] = messageListVisibility }
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+            let (data, response) = try await self.send(request, quotaKey: quotaKey)
+
+            try self.checkedResponse(response, body: data, call: "labels.create")
+
+            return try JSONDecoder().decode(GmailLabel.self, from: data)
+        }
+    }
+
     /// List history changes since a given historyId.
     /// Throws `.historyIdExpired` (404) if the cursor is stale — caller should do a full sync.
     public func listHistory(
@@ -233,13 +331,15 @@ public final class GmailAPIClient: Sendable {
         startHistoryId: String,
         labelId: String? = nil,
         pageToken: String? = nil,
+        historyTypes: [String]? = nil,
+        maxResults: Int? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> HistoryListResponse {
         try await withRetry {
             try await self.meter(self.unitCost.historyList, key: quotaKey)
             return try await self.historyRequest(
                 accessToken: accessToken, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
-                quotaKey: quotaKey
+                historyTypes: historyTypes, maxResults: maxResults, quotaKey: quotaKey
             )
         }
     }
@@ -255,6 +355,8 @@ public final class GmailAPIClient: Sendable {
         startHistoryId: String,
         labelId: String? = nil,
         pageToken: String? = nil,
+        historyTypes: [String]? = nil,
+        maxResults: Int? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> HistoryListResponse {
         try await withRetry {
@@ -264,7 +366,7 @@ public final class GmailAPIClient: Sendable {
             }) { token in
                 try await self.historyRequest(
                     accessToken: token, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
-                    quotaKey: quotaKey
+                    historyTypes: historyTypes, maxResults: maxResults, quotaKey: quotaKey
                 )
             }
         }
@@ -276,6 +378,8 @@ public final class GmailAPIClient: Sendable {
         startHistoryId: String,
         labelId: String?,
         pageToken: String?,
+        historyTypes: [String]?,
+        maxResults: Int?,
         quotaKey: String
     ) async throws -> HistoryListResponse {
         var queryItems = [
@@ -290,7 +394,17 @@ public final class GmailAPIClient: Sendable {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
 
-        let url = try apiURL("\(baseURL)/history", queryItems: queryItems)
+        // Repeated `historyTypes=` items (messageAdded, messageDeleted,
+        // labelAdded, labelRemoved); absent means every type.
+        for historyType in historyTypes ?? [] {
+            queryItems.append(URLQueryItem(name: "historyTypes", value: historyType))
+        }
+
+        if let maxResults {
+            queryItems.append(URLQueryItem(name: "maxResults", value: String(maxResults)))
+        }
+
+        let url = try apiURL("\(usersBase)/history", queryItems: queryItems)
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
@@ -332,7 +446,7 @@ public final class GmailAPIClient: Sendable {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
         }
 
-        let url = try apiURL("\(baseURL)/threads", queryItems: queryItems)
+        let url = try apiURL("\(usersBase)/threads", queryItems: queryItems)
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
@@ -359,7 +473,7 @@ public final class GmailAPIClient: Sendable {
     /// The same fetch with the token resolved AFTER the bucket's wait, on
     /// every attempt (and a 401 given one refresh + re-send) — the per-id
     /// fallback's entry point, so a long wait cannot age the token it sends.
-    func getThread(
+    public func getThread(
         tokenSource: GmailTokenSource,
         threadId: String,
         format: MessageFormat = .full,
@@ -381,7 +495,7 @@ public final class GmailAPIClient: Sendable {
         format: MessageFormat,
         quotaKey: String
     ) async throws -> GmailThread {
-        let url = try self.apiURL("\(self.baseURL)/threads/\(threadId)", queryItems: [
+        let url = try self.apiURL("\(self.usersBase)/threads/\(Self.pathSegment(threadId))", queryItems: [
             URLQueryItem(name: "format", value: format.rawValue)
         ])
         var request = URLRequest(url: url)
@@ -441,32 +555,44 @@ public final class GmailAPIClient: Sendable {
 
     // MARK: - Messages
 
+    /// - Parameter metadataHeaders: header names to return (repeated
+    ///   `metadataHeaders=` items). Sent only when `format` is `.metadata`,
+    ///   the only format Gmail applies them to; nil or empty returns every
+    ///   header.
     public func getMessage(
         accessToken: String,
         messageId: String,
         format: MessageFormat = .full,
+        metadataHeaders: [String]? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
         try await withRetry {
             try await self.meter(self.unitCost.messagesGet, key: quotaKey)
-            return try await self.messageRequest(accessToken: accessToken, messageId: messageId, format: format, quotaKey: quotaKey)
+            return try await self.messageRequest(
+                accessToken: accessToken, messageId: messageId, format: format,
+                metadataHeaders: metadataHeaders, quotaKey: quotaKey
+            )
         }
     }
 
     /// The same fetch with the token resolved AFTER the bucket's wait, on
     /// every attempt (and a 401 given one refresh + re-send) — the per-id
     /// fallback's entry point, so a long wait cannot age the token it sends.
-    func getMessage(
+    public func getMessage(
         tokenSource: GmailTokenSource,
         messageId: String,
         format: MessageFormat = .full,
+        metadataHeaders: [String]? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
         try await withRetry {
             try await self.withTokenSource(tokenSource, meter: {
                 try await self.meter(self.unitCost.messagesGet, key: quotaKey)
             }) { token in
-                try await self.messageRequest(accessToken: token, messageId: messageId, format: format, quotaKey: quotaKey)
+                try await self.messageRequest(
+                    accessToken: token, messageId: messageId, format: format,
+                    metadataHeaders: metadataHeaders, quotaKey: quotaKey
+                )
             }
         }
     }
@@ -476,11 +602,16 @@ public final class GmailAPIClient: Sendable {
         accessToken: String,
         messageId: String,
         format: MessageFormat,
+        metadataHeaders: [String]?,
         quotaKey: String
     ) async throws -> GmailMessage {
-        let url = try self.apiURL("\(self.baseURL)/messages/\(messageId)", queryItems: [
-            URLQueryItem(name: "format", value: format.rawValue)
-        ])
+        var queryItems = [URLQueryItem(name: "format", value: format.rawValue)]
+        if format == .metadata {
+            for header in metadataHeaders ?? [] {
+                queryItems.append(URLQueryItem(name: "metadataHeaders", value: header))
+            }
+        }
+        let url = try self.apiURL("\(self.usersBase)/messages/\(Self.pathSegment(messageId))", queryItems: queryItems)
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
@@ -503,37 +634,70 @@ public final class GmailAPIClient: Sendable {
             // call whose 16,603-row eager sweep starved the 2026-09-12
             // backfill while the bucket showed a rate it was not holding.
             try await self.meter(self.unitCost.attachmentsGet, key: quotaKey)
-            let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/attachments/\(attachmentId)")
-
-            var request = URLRequest(url: url)
-            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            request.timeoutInterval = 60
-
-            let (data, response) = try await self.send(request, quotaKey: quotaKey)
-
-            try self.checkedResponse(response, body: data, call: "getAttachment")
-
-            struct AttachmentResponse: Codable {
-                let size: Int
-                let data: String
-            }
-
-            let attachmentResponse = try JSONDecoder().decode(AttachmentResponse.self, from: data)
-
-            // Base64url → Data
-            var base64 = attachmentResponse.data
-                .replacingOccurrences(of: "-", with: "+")
-                .replacingOccurrences(of: "_", with: "/")
-
-            let padding = (4 - base64.count % 4) % 4
-            base64 += String(repeating: "=", count: padding)
-
-            guard let attachmentData = Data(base64Encoded: base64) else {
-                throw GmailAPIError.parsingError
-            }
-
-            return attachmentData
+            return try await self.attachmentRequest(
+                accessToken: accessToken, messageId: messageId, attachmentId: attachmentId, quotaKey: quotaKey
+            )
         }
+    }
+
+    /// The same download with the token resolved after the bucket's wait, and
+    /// a 401 given one refresh + re-send.
+    public func getAttachment(
+        tokenSource: GmailTokenSource,
+        messageId: String,
+        attachmentId: String,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> Data {
+        try await withRetry {
+            try await self.withTokenSource(tokenSource, meter: {
+                try await self.meter(self.unitCost.attachmentsGet, key: quotaKey)
+            }) { token in
+                try await self.attachmentRequest(
+                    accessToken: token, messageId: messageId, attachmentId: attachmentId, quotaKey: quotaKey
+                )
+            }
+        }
+    }
+
+    /// One unmetered request — callers meter first.
+    private func attachmentRequest(
+        accessToken: String,
+        messageId: String,
+        attachmentId: String,
+        quotaKey: String
+    ) async throws -> Data {
+        let url = try self.simpleURL(
+            "\(self.usersBase)/messages/\(Self.pathSegment(messageId))/attachments/\(Self.pathSegment(attachmentId))"
+        )
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 60
+
+        let (data, response) = try await self.send(request, quotaKey: quotaKey)
+
+        try self.checkedResponse(response, body: data, call: "getAttachment")
+
+        struct AttachmentResponse: Codable {
+            let size: Int
+            let data: String
+        }
+
+        let attachmentResponse = try JSONDecoder().decode(AttachmentResponse.self, from: data)
+
+        // Base64url → Data
+        var base64 = attachmentResponse.data
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+
+        let padding = (4 - base64.count % 4) % 4
+        base64 += String(repeating: "=", count: padding)
+
+        guard let attachmentData = Data(base64Encoded: base64) else {
+            throw GmailAPIError.parsingError
+        }
+
+        return attachmentData
     }
 
     /// Batched message fetch: one `/batch/gmail/v1` envelope per chunk of up to
@@ -612,7 +776,7 @@ public final class GmailAPIClient: Sendable {
     ) async throws -> GmailMessage {
         try await withRetry {
             try await self.meter(self.unitCost.messagesModify, key: quotaKey)
-            let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/modify")
+            let url = try self.simpleURL("\(self.usersBase)/messages/\(Self.pathSegment(messageId))/modify")
 
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -650,7 +814,7 @@ public final class GmailAPIClient: Sendable {
                 // is priced as one operation however many ids it carries,
                 // which is exactly why the drainer batches by (kind, payload).
                 try await self.meter(self.unitCost.messagesBatchModify, key: quotaKey)
-                let url = try self.simpleURL("\(self.baseURL)/messages/batchModify")
+                let url = try self.simpleURL("\(self.usersBase)/messages/batchModify")
 
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
@@ -684,7 +848,7 @@ public final class GmailAPIClient: Sendable {
     ) async throws -> GmailMessage {
         try await withRetry {
             try await self.meter(self.unitCost.messagesTrash, key: quotaKey)
-            let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/trash")
+            let url = try self.simpleURL("\(self.usersBase)/messages/\(Self.pathSegment(messageId))/trash")
 
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -707,7 +871,7 @@ public final class GmailAPIClient: Sendable {
     ) async throws -> GmailMessage {
         try await withRetry {
             try await self.meter(self.unitCost.messagesUntrash, key: quotaKey)
-            let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/untrash")
+            let url = try self.simpleURL("\(self.usersBase)/messages/\(Self.pathSegment(messageId))/untrash")
 
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
@@ -736,7 +900,7 @@ public final class GmailAPIClient: Sendable {
         try await withRetry {
             let isRetry = attempts.next() > 1
             try await self.meter(self.unitCost.messagesDelete, key: quotaKey)
-            let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)")
+            let url = try self.simpleURL("\(self.usersBase)/messages/\(Self.pathSegment(messageId))")
 
             var request = URLRequest(url: url)
             request.httpMethod = "DELETE"
@@ -774,34 +938,106 @@ public final class GmailAPIClient: Sendable {
         // ambiguous. Either surfaces after one attempt so the caller can show
         // a failure rather than risk a double-send.
         try await withRetry(retryClientErrors: false, retryServerErrors: false) {
-            // 100 units — the most expensive call in the API, and the reason a
-            // send must never sit behind a backfill's queue. It rides the
-            // INTERACTIVE lane (the task-local default): a person is waiting.
-            // Unparkable: a cooldown left by a backfill's 429 must not hold a
-            // person's outgoing mail for a minute (or ten). The send is still
-            // charged and still reports any rate signal (`send(_:quotaKey:)`),
-            // so bulk backs off; its own 429 gets `withRetry`'s short backoff.
-            try await self.meter(self.unitCost.messagesSend, key: quotaKey, parkable: false)
-            let url = try self.simpleURL("\(self.baseURL)/messages/send")
-
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 60
-
-            var body: [String: Any] = ["raw": rawMessage]
-            if let threadId {
-                body["threadId"] = threadId
-            }
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-            let (data, response) = try await self.send(request, quotaKey: quotaKey)
-
-            try self.checkedResponse(response, body: data, call: "sendMessage")
-
-            return try JSONDecoder().decode(SendMessageResponse.self, from: data)
+            try await self.meterSend(self.unitCost.messagesSend, key: quotaKey)
+            return try await self.sendMessageRequest(
+                accessToken: accessToken, rawMessage: rawMessage, threadId: threadId, quotaKey: quotaKey
+            )
         }
+    }
+
+    /// The same send with the token resolved after the bucket's wait. A 401
+    /// earns one refresh and one re-send: safe even here, because a 401 means
+    /// Gmail rejected the request and nothing was sent. A 5xx or timeout still
+    /// fails after one attempt.
+    @discardableResult
+    public func sendMessage(
+        tokenSource: GmailTokenSource,
+        rawMessage: String,
+        threadId: String? = nil,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> SendMessageResponse {
+        try await withRetry(retryClientErrors: false, retryServerErrors: false) {
+            try await self.withTokenSource(tokenSource, meter: {
+                try await self.meterSend(self.unitCost.messagesSend, key: quotaKey)
+            }) { token in
+                try await self.sendMessageRequest(
+                    accessToken: token, rawMessage: rawMessage, threadId: threadId, quotaKey: quotaKey
+                )
+            }
+        }
+    }
+
+    /// Meter a send a person is waiting on.
+    ///
+    /// 100 units — the most expensive call in the API, and the reason a send
+    /// must never sit behind a backfill's queue. It rides the INTERACTIVE lane
+    /// (the task-local default): a person is waiting. Unparkable: a cooldown
+    /// left by a backfill's 429 must not hold a person's outgoing mail for a
+    /// minute (or ten). The send is still charged and still reports any rate
+    /// signal (`send(_:quotaKey:)`), so bulk backs off; its own 429 gets
+    /// `withRetry`'s short backoff.
+    private func meterSend(_ units: Int, key: String) async throws {
+        try await meter(units, key: key, parkable: false)
+    }
+
+    /// One unmetered `messages.send` — callers meter first.
+    private func sendMessageRequest(
+        accessToken: String,
+        rawMessage: String,
+        threadId: String?,
+        quotaKey: String
+    ) async throws -> SendMessageResponse {
+        var body: [String: Any] = ["raw": rawMessage]
+        if let threadId {
+            body["threadId"] = threadId
+        }
+        return try await postSend(
+            path: "messages/send", body: body, accessToken: accessToken, quotaKey: quotaKey, call: "sendMessage"
+        )
+    }
+
+    /// Send an existing draft (`drafts.send`, 100 units). The same send rules
+    /// as `sendMessage`: not idempotent, so only a 429 or rate-limit 403 is
+    /// retried, and a 5xx or timeout fails after one attempt — use
+    /// `GmailAPIError.isAmbiguousDelivery(_:)` to decide whether it may have
+    /// gone out. Metered on the unparkable interactive path.
+    @discardableResult
+    public func sendDraft(
+        accessToken: String,
+        draftId: String,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> SendMessageResponse {
+        try await withRetry(retryClientErrors: false, retryServerErrors: false) {
+            try await self.meterSend(self.unitCost.draftsSend, key: quotaKey)
+            return try await self.postSend(
+                path: "drafts/send", body: ["id": draftId], accessToken: accessToken, quotaKey: quotaKey,
+                call: "drafts.send"
+            )
+        }
+    }
+
+    /// One unmetered POST of a send (`messages.send` / `drafts.send`).
+    private func postSend(
+        path: String,
+        body: [String: Any],
+        accessToken: String,
+        quotaKey: String,
+        call: String
+    ) async throws -> SendMessageResponse {
+        let url = try self.simpleURL("\(self.usersBase)/\(path)")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 60
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await self.send(request, quotaKey: quotaKey)
+
+        try self.checkedResponse(response, body: data, call: call)
+
+        return try JSONDecoder().decode(SendMessageResponse.self, from: data)
     }
 
     public func createDraft(
@@ -816,27 +1052,111 @@ public final class GmailAPIClient: Sendable {
         // name the draft, so a repeat is harmless and they retry normally.)
         try await withRetry(retryClientErrors: false, retryServerErrors: false) {
             try await self.meter(self.unitCost.draftsCreate, key: quotaKey)
-            let url = try self.simpleURL("\(self.baseURL)/drafts")
-
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.timeoutInterval = 30
-
-            var messageBody: [String: Any] = ["raw": rawMessage]
-            if let threadId = threadId {
-                messageBody["threadId"] = threadId
-            }
-            let body: [String: Any] = ["message": messageBody]
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-            let (data, response) = try await self.send(request, quotaKey: quotaKey)
-
-            try self.checkedResponse(response, body: data, call: "createDraft")
-
-            return try JSONDecoder().decode(DraftResponse.self, from: data)
+            return try await self.createDraftRequest(
+                accessToken: accessToken, rawMessage: rawMessage, threadId: threadId, quotaKey: quotaKey
+            )
         }
+    }
+
+    /// The same create with the token resolved after the bucket's wait. A 401
+    /// earns one refresh and one re-send (a 401 means no draft was created);
+    /// a 5xx or timeout still fails after one attempt.
+    public func createDraft(
+        tokenSource: GmailTokenSource,
+        rawMessage: String,
+        threadId: String? = nil,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> DraftResponse {
+        try await withRetry(retryClientErrors: false, retryServerErrors: false) {
+            try await self.withTokenSource(tokenSource, meter: {
+                try await self.meter(self.unitCost.draftsCreate, key: quotaKey)
+            }) { token in
+                try await self.createDraftRequest(
+                    accessToken: token, rawMessage: rawMessage, threadId: threadId, quotaKey: quotaKey
+                )
+            }
+        }
+    }
+
+    /// One unmetered `drafts.create` — callers meter first.
+    private func createDraftRequest(
+        accessToken: String,
+        rawMessage: String,
+        threadId: String?,
+        quotaKey: String
+    ) async throws -> DraftResponse {
+        let url = try self.simpleURL("\(self.usersBase)/drafts")
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 30
+
+        var messageBody: [String: Any] = ["raw": rawMessage]
+        if let threadId = threadId {
+            messageBody["threadId"] = threadId
+        }
+        let body: [String: Any] = ["message": messageBody]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await self.send(request, quotaKey: quotaKey)
+
+        try self.checkedResponse(response, body: data, call: "createDraft")
+
+        return try JSONDecoder().decode(DraftResponse.self, from: data)
+    }
+
+    /// Fetch one draft with its message (`drafts.get`, 5 units). Idempotent,
+    /// so it retries like any read.
+    public func getDraft(
+        accessToken: String,
+        draftId: String,
+        format: MessageFormat = .full,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> DraftResponse {
+        try await withRetry {
+            try await self.meter(self.unitCost.draftsGet, key: quotaKey)
+            return try await self.draftRequest(accessToken: accessToken, draftId: draftId, format: format, quotaKey: quotaKey)
+        }
+    }
+
+    /// The same fetch with the token resolved after the bucket's wait, and a
+    /// 401 given one refresh + re-send.
+    public func getDraft(
+        tokenSource: GmailTokenSource,
+        draftId: String,
+        format: MessageFormat = .full,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> DraftResponse {
+        try await withRetry {
+            try await self.withTokenSource(tokenSource, meter: {
+                try await self.meter(self.unitCost.draftsGet, key: quotaKey)
+            }) { token in
+                try await self.draftRequest(accessToken: token, draftId: draftId, format: format, quotaKey: quotaKey)
+            }
+        }
+    }
+
+    /// One unmetered `drafts.get` — callers meter first.
+    private func draftRequest(
+        accessToken: String,
+        draftId: String,
+        format: MessageFormat,
+        quotaKey: String
+    ) async throws -> DraftResponse {
+        let url = try self.apiURL("\(self.usersBase)/drafts/\(Self.pathSegment(draftId))", queryItems: [
+            URLQueryItem(name: "format", value: format.rawValue)
+        ])
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+
+        let (data, response) = try await self.send(request, quotaKey: quotaKey)
+
+        try self.checkedResponse(response, body: data, call: "drafts.get")
+
+        return try JSONDecoder().decode(DraftResponse.self, from: data)
     }
 
     @discardableResult
@@ -849,7 +1169,7 @@ public final class GmailAPIClient: Sendable {
     ) async throws -> DraftResponse {
         try await withRetry {
             try await self.meter(self.unitCost.draftsUpdate, key: quotaKey)
-            let url = try self.simpleURL("\(self.baseURL)/drafts/\(draftId)")
+            let url = try self.simpleURL("\(self.usersBase)/drafts/\(Self.pathSegment(draftId))")
 
             var request = URLRequest(url: url)
             request.httpMethod = "PUT"
@@ -879,7 +1199,7 @@ public final class GmailAPIClient: Sendable {
     ) async throws {
         try await withRetry {
             try await self.meter(self.unitCost.draftsDelete, key: quotaKey)
-            let url = try self.simpleURL("\(self.baseURL)/drafts/\(draftId)")
+            let url = try self.simpleURL("\(self.usersBase)/drafts/\(Self.pathSegment(draftId))")
 
             var request = URLRequest(url: url)
             request.httpMethod = "DELETE"

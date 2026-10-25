@@ -85,6 +85,9 @@ public struct HistoryListResponse: Codable, Sendable {
         public struct MessageRef: Codable, Sendable {
             public let id: String
             public let threadId: String
+            /// The message's labels at the time of the change, when Gmail
+            /// includes them (it does on `messagesAdded`).
+            public let labelIds: [String]?
         }
 
         public struct MessageChange: Codable, Sendable {
@@ -231,10 +234,21 @@ public struct DraftResponse: Codable, Sendable {
     /// `drafts.create` / `drafts.update` responses always populate it.
     public let message: DraftMessage?
 
+    /// The draft's message. `drafts.list` returns only `id` / `threadId`;
+    /// `drafts.get` fills the rest at the requested format (`payload` at
+    /// `.full` / `.metadata`). Every addition is optional, so a partial
+    /// draft still decodes.
     public struct DraftMessage: Codable, Sendable {
         public let id: String
         public let threadId: String?
         public let labelIds: [String]?
+        public let snippet: String?
+        public let historyId: String?
+        public let internalDate: String?
+        public let sizeEstimate: Int?
+        public let payload: GmailMessage.MessagePayload?
+        /// `.raw` format only: the base64url RFC 2822 message.
+        public let raw: String?
     }
 }
 
@@ -257,6 +271,35 @@ public struct GmailProfile: Codable, Sendable {
     public let messagesTotal: Int?
     public let threadsTotal: Int?
     public let historyId: String
+}
+
+// MARK: - Lenient decoding
+
+// Gmail omits `snippet` on a message with no text and `size` on some empty
+// bodies. These decode them as "" / 0 instead of failing the whole message;
+// the stored types, the memberwise inits and encoding are unchanged.
+
+extension GmailMessage {
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.threadId = try container.decode(String.self, forKey: .threadId)
+        self.labelIds = try container.decodeIfPresent([String].self, forKey: .labelIds)
+        self.snippet = try container.decodeIfPresent(String.self, forKey: .snippet) ?? ""
+        self.historyId = try container.decodeIfPresent(String.self, forKey: .historyId)
+        self.internalDate = try container.decode(String.self, forKey: .internalDate)
+        self.payload = try container.decodeIfPresent(MessagePayload.self, forKey: .payload)
+        self.sizeEstimate = try container.decodeIfPresent(Int.self, forKey: .sizeEstimate)
+    }
+}
+
+extension GmailMessage.MessagePayload.Body {
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.attachmentId = try container.decodeIfPresent(String.self, forKey: .attachmentId)
+        self.size = try container.decodeIfPresent(Int.self, forKey: .size) ?? 0
+        self.data = try container.decodeIfPresent(String.self, forKey: .data)
+    }
 }
 
 // MARK: - Enums

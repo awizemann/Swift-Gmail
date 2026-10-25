@@ -24,8 +24,6 @@ import os
 
 private let logger = GmailLogging.logger(category: "GmailAPIClient")
 
-private let batchEndpoint = "https://gmail.googleapis.com/batch/gmail/v1"
-
 /// Rounds of per-part re-issue for sub-requests that came back 429/5xx.
 ///
 /// ONE. A per-part 429 means this account is over budget right now; sitting
@@ -400,11 +398,11 @@ extension GmailAPIClient {
             let operations = ids.enumerated().map { index, id in
                 GmailBatchOperation(
                     contentId: GmailBatchProtocol.contentId(forIndex: index),
-                    path: "/gmail/v1/users/me/\(resource)/\(Self.pathEscaped(id))?format=\(format.rawValue)"
+                    path: "/gmail/v1/users/me/\(resource)/\(Self.pathSegment(id))?format=\(format.rawValue)"
                 )
             }
 
-            guard let url = URL(string: batchEndpoint) else {
+            guard let url = URL(string: self.batchURL) else {
                 throw GmailAPIError.invalidURL
             }
             var request = URLRequest(url: url)
@@ -475,11 +473,6 @@ extension GmailAPIClient {
         return seconds
     }
 
-    /// Gmail ids are URL-safe base64-ish, but escape anyway — an unescaped
-    /// `?` or `#` in a sub-request target would silently change the call.
-    private static func pathEscaped(_ id: String) -> String {
-        id.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? id
-    }
 }
 
 // MARK: - Per-id fallback

@@ -10,8 +10,10 @@ flow and hands the client a token source.
 
 ## What it does
 
-- **The `users.*` surface**: messages (list, get, modify, trash, untrash,
-  delete, send), threads, labels, history, drafts, attachments, profile.
+- **The `users.*` surface**: messages (list, get, modify, batchModify,
+  trash, untrash, delete, send), threads (list, get), labels (list, create),
+  history, drafts (list, get, create, update, delete, send), attachments,
+  profile.
 - **`/batch` multipart** (`GmailBatchProtocol`): many `get`s in one request,
   with per-part 404 tolerance, per-part 429/5xx re-issue, and envelope retry.
   Falls back to per-id requests if the batch endpoint refuses the envelope.
@@ -26,7 +28,7 @@ flow and hands the client a token source.
 - **Per-request tokens** (`GmailTokenSource`): the bearer is resolved right
   before each request goes out, after any quota wait, and a 401 earns exactly
   one single-flighted refresh per call.
-- **Swift 6 strict concurrency** throughout. 110+ tests, none of which touch
+- **Swift 6 strict concurrency** throughout. 180+ tests, none of which touch
   the network.
 
 Encoded gotchas you would otherwise rediscover: `+` in a query must be
@@ -205,7 +207,7 @@ A rate limit surfaces as `.rateLimitExceeded` (rate-reason 403) or as
 a call on that client would use right now (the override if set, otherwise
 the client's own).
 
-`sendMessage` and `createDraft` are not idempotent. They retry only a 429 or a
+`sendMessage`, `sendDraft` and `createDraft` are not idempotent. They retry only a 429 or a
 rate-limit 403, which Gmail returns before accepting the request. A 5xx or a
 timeout fails after one attempt, because Gmail may already have accepted the
 message (or created the draft) and a retry would send it twice.
@@ -220,6 +222,65 @@ included), rate and quota refusals, `.deadlineExceeded`, and connection
 failures that never reached Gmail. It cannot recognise your own auth error
 (the one your `GmailCredentialErrors` reports), so check for that first: a
 dead credential means nothing was sent.
+
+### Endpoints and parameters
+
+- `getMessage(…, metadataHeaders:)` sends repeated `metadataHeaders` items,
+  only when `format` is `.metadata` (the only format Gmail applies them to).
+- `listHistory(…, historyTypes:, maxResults:)` on both the `accessToken:` and
+  `tokenSource:` variants; `historyTypes` is sent as repeated items.
+  `HistoryRecord.MessageRef.labelIds` carries the labels Gmail reports.
+- `listMessages(…, labelIds:)` sends repeated `labelIds` items (Gmail ANDs them).
+- `getDraft(accessToken:draftId:format:)` (`drafts.get`, 5 units) returns
+  the draft with its message at that format: `DraftMessage` now has optional
+  `snippet`, `historyId`, `internalDate`, `sizeEstimate`, `payload` and `raw`.
+  It retries like any read.
+- `createLabel(accessToken:name:labelListVisibility:messageListVisibility:)`
+  (`labels.create`, 5 units). A label name is unique, so a create that 5xx'd
+  or timed out may already exist: it retries only a 429 or rate-limit 403,
+  never a 5xx or timeout.
+- `sendDraft(accessToken:draftId:)` (`drafts.send`, 100 units) follows the
+  send rules below: one attempt on a 5xx or timeout, retried only on a rate
+  refusal, metered on the unparkable interactive path. Decide whether a failed
+  `sendDraft` may have gone out with `GmailAPIError.isAmbiguousDelivery(_:)`.
+- `tokenSource:` variants of `getMessage`, `getThread`, `getAttachment`,
+  `sendMessage`, `createDraft` and `getDraft`: the token is resolved after the
+  quota wait, and a 401 earns one refresh and one re-send. That is safe even
+  for `sendMessage` and `createDraft`, because a 401 means Gmail rejected the
+  request; a 5xx or timeout still fails after one attempt, with no refresh.
+
+### Base URL and ids
+
+`GmailAPIClient(…, baseURL:)` points the client at another root (a proxy, a
+test server). REST calls go to `<root>/gmail/v1/users/me/…` and batch
+envelopes to `<root>/batch/gmail/v1`; the batch sub-requests keep Gmail's
+origin-relative `/gmail/v1/users/me/…` targets. The default is
+`https://gmail.googleapis.com`. The root may carry a path prefix but not a
+query or fragment: the init stops with a precondition failure on one.
+
+Every id placed in a URL path (message, draft, thread, attachment, and the
+batch sub-requests) is percent-encoded as one segment: everything outside
+`A-Z a-z 0-9 - . _ ~` is escaped, and an id of `.` or `..` is sent as
+`%2E` / `%2E%2E`, so no id can add a segment, start a query or resolve as a
+dot-segment. Gmail's hex ids are unchanged.
+
+`GmailMessage.snippet` decodes as `""` and `MessagePayload.Body.size` as `0`
+when Gmail omits them.
+
+## 0.3.5
+
+Additive and source-compatible: `sendDraft`, `createLabel`, `getDraft`;
+`metadataHeaders` on `getMessage`, `historyTypes`/`maxResults` on
+`listHistory`, `labelIds` on `listMessages`; public `tokenSource:` variants of
+`getMessage`, `getThread`, `getAttachment`, `sendMessage`, `createDraft` and
+`getDraft`; a `baseURL` init parameter; one-segment path encoding of every
+id; lenient `snippet` / `Body.size` decoding; optional message fields on
+`DraftMessage` and `labelIds` on `HistoryRecord.MessageRef`; new
+`GmailUnitCost` entries `draftsGet` (5), `draftsSend` (100) and `labelsCreate` (5).
+
+Behaviour change to check: ids in URL paths are now percent-encoded by the
+client. A caller that percent-encoded ids itself must stop, or its `%`
+reaches Gmail as `%25` and the id no longer matches.
 
 ## 0.3.4
 
