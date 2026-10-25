@@ -87,7 +87,11 @@ extension GmailAPIClient {
         let maxBatchesInFlight = GmailBatchProtocol.maxBatchesInFlight(for: format)
         let gate = GmailTokenRefreshGate(source: tokenSource)
 
-        return try await withThrowingTaskGroup(of: (Int, BatchFetchOutcome<T>).self) { group in
+        // One deadline for the whole fetch — every chunk, round and envelope
+        // retry inside inherits it, so `maxElapsed` bounds the call, not each
+        // envelope.
+        return try await withDeadlineScope(effectiveRetryPolicy) { _ in
+        try await withThrowingTaskGroup(of: (Int, BatchFetchOutcome<T>).self) { group in
             var collected: [Int: BatchFetchOutcome<T>] = [:]
             var nextChunk = 0
             var inFlight = 0
@@ -131,6 +135,7 @@ extension GmailAPIClient {
                 transient: chunks.indices.flatMap { collected[$0]?.transient ?? [] },
                 failed: chunks.indices.flatMap { collected[$0]?.failed ?? [] }
             )
+        }
         }
     }
 
@@ -183,14 +188,25 @@ extension GmailAPIClient {
         while !pending.isEmpty {
             try Task.checkCancellation()
 
-            let response = try await postBatch(
-                gate: gate,
-                resource: resource,
-                ids: pending,
-                format: format,
-                unitCost: unitCost,
-                quotaKey: quotaKey
-            )
+            let response: BatchResponse
+            do {
+                response = try await postBatch(
+                    gate: gate,
+                    resource: resource,
+                    ids: pending,
+                    format: format,
+                    unitCost: unitCost,
+                    quotaKey: quotaKey
+                )
+            } catch GmailAPIError.deadlineExceeded(let retryAfter) where round > 0 || authRetried {
+                // A re-issue round ran out of budget: keep what earlier rounds
+                // fetched and hand the rest back, like exhausted rounds. The
+                // FIRST envelope's refusal still throws — nothing to keep.
+                logger.warning("Gmail batch \(resource, privacy: .public).get: deadline reached before re-issuing \(pending.count, privacy: .public) sub-request(s) (retry after \(retryAfter ?? 0, privacy: .public)s) — reported as leftovers")
+                leftover += pending
+                transient += pending
+                break
+            }
 
             var retryable: [String] = []
             var unauthorized: [String] = []
@@ -308,6 +324,13 @@ extension GmailAPIClient {
                     logger.warning("Gmail batch \(resource, privacy: .public).get: re-issuing \(pending.count, privacy: .public) sub-requests, paced by the account's quota bucket")
                 } else {
                     logger.warning("Gmail batch \(resource, privacy: .public).get: re-issuing \(pending.count, privacy: .public) sub-requests in \(String(format: "%.1f", retryDelay), privacy: .public)s")
+                    if let deadline = GmailRetryPolicy.activeDeadline,
+                       quotaBucket.now().addingTimeInterval(retryDelay) > deadline {
+                        // Same as a refused re-issue above: hand back, don't sleep.
+                        leftover += pending
+                        transient += pending
+                        break
+                    }
                     if retryDelay > 0 {
                         try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
                     }
@@ -366,7 +389,7 @@ extension GmailAPIClient {
         unitCost: Int,
         quotaKey: String
     ) async throws -> BatchResponse {
-        try await withRetry(maxRetries: 3, rateLimitFloor: 0) {
+        try await withRetry(rateLimitFloor: 0) {
             // Debit + wait before every attempt, retries included: a re-issued
             // envelope costs the same quota as the first one.
             try await self.quotaBucket.consume(units: ids.count * unitCost, key: quotaKey)

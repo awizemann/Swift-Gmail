@@ -305,6 +305,12 @@ public enum GmailAPIError: Error, LocalizedError, Equatable {
     /// not the rate — is the problem. Hosts can substitute their own error
     /// through `GmailCredentialErrors`.
     case authenticationFailed(String)
+    /// The call's `GmailRetryPolicy.maxElapsed` budget would run out before
+    /// the quota bucket let the request go. Thrown BEFORE the request is sent,
+    /// with nothing debited. `retryAfter` is how long until the bucket would
+    /// let this key go (the remaining park), or nil when not known — a host
+    /// can reschedule on it.
+    case deadlineExceeded(retryAfter: TimeInterval?)
 
     public var errorDescription: String? {
         switch self {
@@ -327,7 +333,70 @@ public enum GmailAPIError: Error, LocalizedError, Equatable {
             return "Failed to construct Gmail API URL"
         case .authenticationFailed(let detail):
             return "Gmail authentication failed: \(detail)"
+        case .deadlineExceeded(let retryAfter):
+            if let retryAfter {
+                return "Gmail request not sent: it would have waited \(Int(retryAfter.rounded(.up)))s, past its deadline"
+            }
+            return "Gmail request not sent: its deadline passed"
         }
+    }
+
+    /// Might Gmail have ACCEPTED the non-idempotent request (`sendMessage`,
+    /// `createDraft`) that threw `error`? Auto-retry a send only when this
+    /// returns false; on true, check (Sent folder, drafts list) or ask.
+    ///
+    /// When unsure it answers true: a duplicate send is worse than a
+    /// question. In particular `URLError.cancelled` and `CancellationError`
+    /// ALWAYS return true — a cancellation during the pre-send quota wait
+    /// looks the same as one with the request in flight, and true is the
+    /// safe answer for both.
+    ///
+    /// Credential failures: a host's own auth error (the one its
+    /// `GmailCredentialErrors` recognises) is unknown here, so it comes back
+    /// true. Check your own auth error FIRST — a dead credential means the
+    /// request never reached Gmail. (`.authenticationFailed`, this package's
+    /// own, is handled: false.)
+    public static func isAmbiguousDelivery(_ error: any Error) -> Bool {
+        if error is CancellationError { return true }
+        if let gmailError = error as? GmailAPIError {
+            switch gmailError {
+            case .httpError(let statusCode, _):
+                // 4xx (429 and 401 included) is a refusal; 5xx can come after acceptance.
+                return !(400...499).contains(statusCode)
+            case .rateLimitExceeded, .quotaExceeded:
+                // Rate / quota refusals: Gmail answers them before accepting.
+                return false
+            case .deadlineExceeded:
+                // Thrown by the quota wait, before the request was sent.
+                return false
+            case .invalidURL:
+                // The request could not even be built.
+                return false
+            case .authenticationFailed:
+                // A refreshed token was still answered 401 — refused.
+                return false
+            case .historyIdExpired:
+                // Only `history.list` throws it; never a send.
+                return false
+            case .invalidResponse, .parsingError:
+                // Something came back that we could not read: it may have
+                // been the success response.
+                return true
+            }
+        }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .notConnectedToInternet, .cannotConnectToHost, .cannotFindHost,
+                 .dnsLookupFailed, .secureConnectionFailed:
+                // No connection was made, so no request reached Gmail.
+                return false
+            default:
+                // Timed out, connection lost, unreadable / bad response,
+                // cancelled — and anything unrecognised.
+                return true
+            }
+        }
+        return true
     }
 }
 

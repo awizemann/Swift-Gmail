@@ -54,7 +54,10 @@ extension GmailQuotaBucket {
     /// iOS background expiry) leaves at once.
     nonisolated func yieldToInteractive(units: Int, key: String) async throws {
         guard policy.maxBulkYield > 0 else { return }
-        let deadline = now().addingTimeInterval(policy.maxBulkYield)
+        // A bounded call's deadline caps the yield too: past it, the request
+        // goes rather than overrun the caller's budget (its units are booked).
+        let yieldCap = now().addingTimeInterval(policy.maxBulkYield)
+        let deadline = GmailRetryPolicy.activeDeadline.map { min($0, yieldCap) } ?? yieldCap
         var waited = false
         while true {
             try Task.checkCancellation()

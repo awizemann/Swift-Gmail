@@ -153,10 +153,56 @@ Reads, label changes, trash/untrash/delete, `drafts.update` and `drafts.delete`
 are idempotent and retry 5xx, 429, rate-limit 403s and transient network errors
 (timeout, connection lost), up to three times.
 
+How hard a call retries is a `GmailRetryPolicy`: `maxAttempts` (first try
+included, default 4), `maxElapsed` (a wall-clock budget for the whole call,
+quota waits included; default none) and `retryOnRateLimit` (default true).
+Set it per client, or per task tree, where it wins over the client's:
+
+```swift
+let client = GmailAPIClient(quotaBucket: bucket, retryPolicy: .failFast(within: 10))
+
+try await GmailRetryPolicy.with(.failFast(within: 10)) {
+    try await refreshInbox()   // every call in here gives up within 10 s
+}
+```
+
+Under `.default` there is no time bound. Each attempt first waits for the
+quota bucket, and a rate signal parks the account for 60 s, or up to the
+`Retry-After` the server sent, capped at 10 minutes. Four attempts plus their
+backoffs can therefore take tens of minutes on a throttled account. A host
+with a budget (background refresh, a quick sync) should use
+`.failFast(within:)` or `GmailRetryPolicy.with(...)`. Under a deadline, a
+quota wait that would pass it is not started (nothing is debited) and throws
+`.deadlineExceeded(retryAfter:)`, the time until the account is free again.
+A backoff that would pass it is not slept either: the last attempt's own error
+is thrown, since that is the one worth acting on. A batch fetch whose re-issue
+round runs out of time returns the remaining ids as leftovers.
+
 `sendMessage` and `createDraft` are not idempotent. They retry only a 429 or a
 rate-limit 403, which Gmail returns before accepting the request. A 5xx or a
 timeout fails after one attempt, because Gmail may already have accepted the
 message (or created the draft) and a retry would send it twice.
+
+To decide whether a failed send may have gone out, use
+`GmailAPIError.isAmbiguousDelivery(error)`, and auto-retry a send only when it
+returns false. It is true for a 5xx, a timeout or lost connection, and any
+error it does not recognise. `URLError.cancelled` and `CancellationError`
+always return true: a cancellation during the pre-send quota wait looks the
+same as one with the request in flight. It is false for a 4xx (429 and 401
+included), rate and quota refusals, `.deadlineExceeded`, and connection
+failures that never reached Gmail. It cannot recognise your own auth error
+(the one your `GmailCredentialErrors` reports), so check for that first: a
+dead credential means nothing was sent.
+
+## Upgrading from 0.2.0
+
+- `GmailAPIError` has a new case, `deadlineExceeded(retryAfter:)`. An
+  exhaustive `switch` over it needs to handle it. It is only thrown when a
+  `GmailRetryPolicy` sets `maxElapsed`.
+- The defaults are unchanged: `GmailRetryPolicy.default` gives the same
+  attempts, backoffs and rate-limit retries as 0.2.0.
+- A call made from a task that is already cancelled now throws
+  `CancellationError` before it meters or sends anything.
 
 ## Upgrading from 0.1.0
 
@@ -183,7 +229,8 @@ still compiles). Behavior changes:
 
 - The list and read endpoints (`listMessages`, `listDrafts`, `getProfile`,
   `listLabels`, `listHistory`, `listThreads`) now retry like the other reads.
-  A rate limit can add up to about 35 s of backoff before the error surfaces.
+  A rate limit adds backoff and quota waits before the error surfaces (see
+  "Errors and retries" for the bound).
 - Each attempt is metered against the quota bucket, retries included.
 - `sendMessage` and `createDraft` are no longer retried after a 5xx (or a
   timeout).

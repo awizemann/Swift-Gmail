@@ -29,15 +29,25 @@ public final class GmailAPIClient: Sendable {
     public typealias Transport = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     let transport: Transport
 
-    public init() {
+    /// How hard this client's calls retry, unless the task tree overrides it
+    /// with `GmailRetryPolicy.with(_:operation:)`.
+    public let retryPolicy: GmailRetryPolicy
+
+    public init(retryPolicy: GmailRetryPolicy = .default) {
         self.quotaBucket = .shared
         self.transport = { try await URLSession.shared.data(for: $0) }
+        self.retryPolicy = retryPolicy
     }
 
-    public init(quotaBucket: GmailQuotaBucket, transport: Transport? = nil) {
+    public init(quotaBucket: GmailQuotaBucket, transport: Transport? = nil, retryPolicy: GmailRetryPolicy = .default) {
         self.quotaBucket = quotaBucket
         self.transport = transport ?? { try await URLSession.shared.data(for: $0) }
+        self.retryPolicy = retryPolicy
     }
+
+    /// The policy in force for this call: the task-local override if one is
+    /// set, otherwise the client's.
+    var effectiveRetryPolicy: GmailRetryPolicy { GmailRetryPolicy.override ?? retryPolicy }
 
     /// Quota bucket for callers that don't know (or don't care) which account
     /// they are spending against — one-off profile lookups during account
@@ -131,7 +141,7 @@ public final class GmailAPIClient: Sendable {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        return try await withRetry(maxRetries: 3) {
+        return try await withRetry {
             try await self.meter(self.unitCost.messagesList, key: quotaKey)
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
             try self.checkedResponse(response, body: data, call: "messages.list")
@@ -160,7 +170,7 @@ public final class GmailAPIClient: Sendable {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
 
-        return try await withRetry(maxRetries: 3) {
+        return try await withRetry {
             try await self.meter(self.unitCost.draftsList, key: quotaKey)
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
             try self.checkedResponse(response, body: data, call: "drafts.list")
@@ -178,7 +188,7 @@ public final class GmailAPIClient: Sendable {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
 
-        return try await withRetry(maxRetries: 3) {
+        return try await withRetry {
             try await self.meter(self.unitCost.getProfile, key: quotaKey)
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
             try self.checkedResponse(response, body: data, call: "getProfile")
@@ -196,7 +206,7 @@ public final class GmailAPIClient: Sendable {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = 30
 
-        return try await withRetry(maxRetries: 3) {
+        return try await withRetry {
             try await self.meter(self.unitCost.labelsList, key: quotaKey)
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
             try self.checkedResponse(response, body: data, call: "labels.list")
@@ -214,7 +224,7 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> HistoryListResponse {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.meter(self.unitCost.historyList, key: quotaKey)
             return try await self.historyRequest(
                 accessToken: accessToken, startHistoryId: startHistoryId, labelId: labelId, pageToken: pageToken,
@@ -236,7 +246,7 @@ public final class GmailAPIClient: Sendable {
         pageToken: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> HistoryListResponse {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.withTokenSource(tokenSource, meter: {
                 // Every send is metered — the 401 re-send included.
                 try await self.meter(self.unitCost.historyList, key: quotaKey)
@@ -315,7 +325,7 @@ public final class GmailAPIClient: Sendable {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        return try await withRetry(maxRetries: 3) {
+        return try await withRetry {
             try await self.meter(self.unitCost.threadsList, key: quotaKey)
             let (data, response) = try await self.send(request, quotaKey: quotaKey)
             try self.checkedResponse(response, body: data, call: "threads.list")
@@ -329,7 +339,7 @@ public final class GmailAPIClient: Sendable {
         format: MessageFormat = .full,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailThread {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.meter(self.unitCost.threadsGet, key: quotaKey)
             return try await self.threadRequest(accessToken: accessToken, threadId: threadId, format: format, quotaKey: quotaKey)
         }
@@ -344,7 +354,7 @@ public final class GmailAPIClient: Sendable {
         format: MessageFormat = .full,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailThread {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.withTokenSource(tokenSource, meter: {
                 try await self.meter(self.unitCost.threadsGet, key: quotaKey)
             }) { token in
@@ -426,7 +436,7 @@ public final class GmailAPIClient: Sendable {
         format: MessageFormat = .full,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.meter(self.unitCost.messagesGet, key: quotaKey)
             return try await self.messageRequest(accessToken: accessToken, messageId: messageId, format: format, quotaKey: quotaKey)
         }
@@ -441,7 +451,7 @@ public final class GmailAPIClient: Sendable {
         format: MessageFormat = .full,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.withTokenSource(tokenSource, meter: {
                 try await self.meter(self.unitCost.messagesGet, key: quotaKey)
             }) { token in
@@ -477,7 +487,7 @@ public final class GmailAPIClient: Sendable {
         attachmentId: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> Data {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             // 20 units — as expensive as a full `messages.get`. This is the
             // call whose 16,603-row eager sweep starved the 2026-09-12
             // backfill while the bucket showed a rate it was not holding.
@@ -589,7 +599,7 @@ public final class GmailAPIClient: Sendable {
         removeLabelIds: [String] = [],
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.meter(self.unitCost.messagesModify, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/modify")
 
@@ -624,7 +634,7 @@ public final class GmailAPIClient: Sendable {
 
         for batch in messageIds.chunked(into: 1000) {
             try Task.checkCancellation()
-            try await withRetry(maxRetries: 3) {
+            try await withRetry {
                 // Flat 50 units per CALL, not per id — `messages.batchModify`
                 // is priced as one operation however many ids it carries,
                 // which is exactly why the drainer batches by (kind, payload).
@@ -661,7 +671,7 @@ public final class GmailAPIClient: Sendable {
         messageId: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.meter(self.unitCost.messagesTrash, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/trash")
 
@@ -684,7 +694,7 @@ public final class GmailAPIClient: Sendable {
         messageId: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> GmailMessage {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.meter(self.unitCost.messagesUntrash, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)/untrash")
 
@@ -712,7 +722,7 @@ public final class GmailAPIClient: Sendable {
         // failure. A first-attempt 404 still throws: the caller asked to
         // delete something that was never there.
         let attempts = AttemptCounter()
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             let isRetry = attempts.next() > 1
             try await self.meter(self.unitCost.messagesDelete, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/messages/\(messageId)")
@@ -752,7 +762,7 @@ public final class GmailAPIClient: Sendable {
         // will deliver) the message — and a client timeout is just as
         // ambiguous. Either surfaces after one attempt so the caller can show
         // a failure rather than risk a double-send.
-        try await withRetry(maxRetries: 3, retryClientErrors: false, retryServerErrors: false) {
+        try await withRetry(retryClientErrors: false, retryServerErrors: false) {
             // 100 units — the most expensive call in the API, and the reason a
             // send must never sit behind a backfill's queue. It rides the
             // INTERACTIVE lane (the task-local default): a person is waiting.
@@ -793,7 +803,7 @@ public final class GmailAPIClient: Sendable {
         // still have created the draft, and a retry would leave a duplicate.
         // Only a rate rejection is retried. (`updateDraft` / `deleteDraft`
         // name the draft, so a repeat is harmless and they retry normally.)
-        try await withRetry(maxRetries: 3, retryClientErrors: false, retryServerErrors: false) {
+        try await withRetry(retryClientErrors: false, retryServerErrors: false) {
             try await self.meter(self.unitCost.draftsCreate, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/drafts")
 
@@ -826,7 +836,7 @@ public final class GmailAPIClient: Sendable {
         threadId: String? = nil,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> DraftResponse {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.meter(self.unitCost.draftsUpdate, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/drafts/\(draftId)")
 
@@ -856,7 +866,7 @@ public final class GmailAPIClient: Sendable {
         draftId: String,
         quotaKey: String = GmailQuotaScope.current
     ) async throws {
-        try await withRetry(maxRetries: 3) {
+        try await withRetry {
             try await self.meter(self.unitCost.draftsDelete, key: quotaKey)
             let url = try self.simpleURL("\(self.baseURL)/drafts/\(draftId)")
 
@@ -981,59 +991,102 @@ public final class GmailAPIClient: Sendable {
     ///   else. The batch path passes 0: `GmailQuotaBucket` has already parked
     ///   the account for its cooldown (≥60s) and is consulted inside the
     ///   retried closure, so a second fixed backoff on top is double-counting.
+    ///
+    /// The attempt cap, deadline and rate-limit rule come from
+    /// `effectiveRetryPolicy`; `retryClientErrors`/`retryServerErrors` are the
+    /// call's own rules, and the stricter of the two wins. `maxRetries` (tests
+    /// only) caps it further.
+    ///
+    /// Deadline: fixed when the call starts (or inherited, if an outer
+    /// bounded call is already running — nesting never extends a budget).
+    /// The quota wait inside `operation` refuses a park past it with
+    /// `.deadlineExceeded`; a backoff that would end past it is not slept —
+    /// the LAST attempt's error is thrown instead. That error is what a host
+    /// acts on (a 5xx's detail, a 429's `Retry-After`), and it classifies
+    /// correctly under `isAmbiguousDelivery`; a bare "deadline" would hide
+    /// whether a send may have gone out.
     func withRetry<T>(
-        maxRetries: Int = 3,
+        maxRetries: Int? = nil,
         baseDelay: TimeInterval = 1.0,
         rateLimitFloor: TimeInterval = 5.0,
         retryClientErrors: Bool = true,
         retryServerErrors: Bool = true,
         operation: @escaping () async throws -> T
     ) async throws -> T {
-        var currentRetry = 0
+        let policy = effectiveRetryPolicy
+        var maxAttempts = max(1, policy.maxAttempts)
+        if let maxRetries { maxAttempts = min(maxAttempts, maxRetries + 1) }
 
-        while true {
-            do {
-                return try await operation()
-            } catch {
-                currentRetry += 1
-
-                let isTransient: Bool
-                let isRateLimit: Bool
-                if let gmailError = error as? GmailAPIError {
-                    switch gmailError {
-                    case .httpError(let statusCode, _):
-                        isTransient = (retryServerErrors && (500...599).contains(statusCode)) || statusCode == 429
-                        isRateLimit = statusCode == 429
-                    case .rateLimitExceeded:
-                        isTransient = true
-                        isRateLimit = true
-                    default:
-                        isTransient = false
+        return try await withDeadlineScope(policy) { deadline in
+            var attempt = 0
+            while true {
+                try Task.checkCancellation()
+                attempt += 1
+                do {
+                    return try await operation()
+                } catch {
+                    let isTransient: Bool
+                    let isRateLimit: Bool
+                    if let gmailError = error as? GmailAPIError {
+                        switch gmailError {
+                        case .httpError(let statusCode, _):
+                            isRateLimit = statusCode == 429
+                            isTransient = (retryServerErrors && (500...599).contains(statusCode))
+                                || (isRateLimit && policy.retryOnRateLimit)
+                        case .rateLimitExceeded:
+                            isTransient = policy.retryOnRateLimit
+                            isRateLimit = true
+                        case .invalidResponse, .quotaExceeded, .historyIdExpired, .parsingError,
+                             .invalidURL, .authenticationFailed, .deadlineExceeded:
+                            isTransient = false
+                            isRateLimit = false
+                        }
+                    } else {
+                        let nsError = error as NSError
+                        isTransient = retryClientErrors &&
+                                     nsError.domain == NSURLErrorDomain &&
+                                     (nsError.code == NSURLErrorTimedOut || nsError.code == NSURLErrorNetworkConnectionLost)
                         isRateLimit = false
                     }
-                } else {
-                    let nsError = error as NSError
-                    isTransient = retryClientErrors &&
-                                 nsError.domain == NSURLErrorDomain &&
-                                 (nsError.code == NSURLErrorTimedOut || nsError.code == NSURLErrorNetworkConnectionLost)
-                    isRateLimit = false
-                }
 
-                if currentRetry > maxRetries || !isTransient {
-                    throw error
-                }
+                    if attempt >= maxAttempts || !isTransient {
+                        throw error
+                    }
 
-                let effectiveBase = isRateLimit ? max(baseDelay, rateLimitFloor) : baseDelay
-                let delay = effectiveBase * pow(2.0, Double(currentRetry - 1))
-                let cause: String
-                if let gmailError = error as? GmailAPIError, case .httpError(let code, _) = gmailError {
-                    cause = "HTTP \(code)"
-                } else {
-                    cause = String(describing: error)
+                    let effectiveBase = isRateLimit ? max(baseDelay, rateLimitFloor) : baseDelay
+                    let delay = effectiveBase * pow(2.0, Double(attempt - 1))
+                    if let deadline, quotaBucket.now().addingTimeInterval(delay) > deadline {
+                        logger.warning("Retry backoff of \(String(format: "%.1f", delay))s would pass the deadline — giving up after attempt \(attempt)")
+                        throw error
+                    }
+                    let cause: String
+                    if let gmailError = error as? GmailAPIError, case .httpError(let code, _) = gmailError {
+                        cause = "HTTP \(code)"
+                    } else {
+                        cause = String(describing: error)
+                    }
+                    logger.warning("Transient \(cause, privacy: .public), retrying in \(String(format: "%.1f", delay))s (attempt \(attempt)/\(maxAttempts))")
+                    if delay > 0 { try await quotaBucket.sleeper(delay) }
                 }
-                logger.warning("Transient \(cause, privacy: .public), retrying in \(String(format: "%.1f", delay))s (attempt \(currentRetry)/\(maxRetries))")
-                if delay > 0 { try await quotaBucket.sleeper(delay) }
             }
+        }
+    }
+
+    /// Run `body` under `policy`'s deadline: now + `maxElapsed` on the
+    /// bucket's clock, or an outer call's deadline if that is sooner. The
+    /// deadline is published as `GmailRetryPolicy.activeDeadline`, which the
+    /// quota bucket's `consume` reads, so every meter inside honours it.
+    func withDeadlineScope<T>(
+        _ policy: GmailRetryPolicy,
+        _ body: (Date?) async throws -> T
+    ) async throws -> T {
+        let own = policy.maxElapsed.map { quotaBucket.now().addingTimeInterval($0) }
+        let deadline: Date? = switch (GmailRetryPolicy.activeDeadline, own) {
+        case let (outer?, own?): min(outer, own)
+        case let (outer, own): outer ?? own
+        }
+        return try await GmailRetryPolicy.$activeDeadline.withValue(deadline) {
+            try await body(deadline)
         }
     }
 }

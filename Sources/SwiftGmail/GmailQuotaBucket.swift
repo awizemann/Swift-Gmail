@@ -538,6 +538,29 @@ public actor GmailQuotaBucket {
         lane: GmailQuotaLane = .interactive,
         parkable: Bool = true
     ) -> TimeInterval {
+        switch reserve(units: units, key: key, lane: lane, parkable: parkable, deadline: nil) {
+        case .booked(let wait), .refused(let wait): return wait
+        }
+    }
+
+    /// What `reserve(units:key:lane:parkable:deadline:)` did.
+    enum Reservation: Equatable {
+        /// Booked; wait this long before sending.
+        case booked(TimeInterval)
+        /// The wait (carried) would end past the deadline, so NOTHING was
+        /// booked: no units debited, no lane clock moved.
+        case refused(TimeInterval)
+    }
+
+    /// `reserve`, refusing — before anything is booked — a reservation whose
+    /// wait would end past `deadline` (on this bucket's `now` clock).
+    func reserve(
+        units: Int,
+        key: String,
+        lane: GmailQuotaLane,
+        parkable: Bool,
+        deadline: Date?
+    ) -> Reservation {
         let instant = now()
         recoverIfDue(key: key, at: instant)
 
@@ -553,6 +576,12 @@ public actor GmailQuotaBucket {
         // its units below (from where it stood), never dragged backwards.
         let unparked = lane == .interactive && !parkable
         let start = unparked ? max(instant, floor) : queued
+        let wait = max(0, start.timeIntervalSince(instant))
+        // Refuse before mutating `bucket`: an over-budget caller must leave
+        // the clocks exactly as it found them.
+        if let deadline, instant.addingTimeInterval(wait) > deadline {
+            return .refused(wait)
+        }
         let bulkDuration = Double(units) / bulkRate(of: bucket, at: instant)
         // Under a bulk-only policy the AIMD rate is the bulk lane's alone; a
         // restored state is the bulk lane's alone too, until this session's
@@ -583,7 +612,7 @@ public actor GmailQuotaBucket {
             bucket.nextFreeBulk = bulkStart.addingTimeInterval(bulkDuration)
         }
         buckets[key] = bucket
-        return max(0, start.timeIntervalSince(instant))
+        return .booked(wait)
     }
 
     /// The bulk lane's rate for `bucket` at `instant`: the AIMD rate times
@@ -741,9 +770,18 @@ public actor GmailQuotaBucket {
         units: Int,
         key: String,
         lane: GmailQuotaLane = GmailQuotaLane.current,
-        parkable: Bool = true
+        parkable: Bool = true,
+        deadline: Date? = GmailRetryPolicy.activeDeadline
     ) async throws {
-        let wait = await reserve(units: units, key: key, lane: lane, parkable: parkable)
+        let wait: TimeInterval
+        switch await reserve(units: units, key: key, lane: lane, parkable: parkable, deadline: deadline) {
+        case .booked(let booked):
+            wait = booked
+        case .refused(let refused):
+            // Thrown at once, not after sleeping to the deadline: the caller
+            // has a budget, and the answer is already known.
+            throw GmailAPIError.deadlineExceeded(retryAfter: refused)
+        }
         if wait > 0 { try await sleeper(wait) }
         if lane == .bulk { try await yieldToInteractive(units: units, key: key) }
     }

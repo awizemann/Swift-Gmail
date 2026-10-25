@@ -122,13 +122,21 @@ actor GmailTokenRefreshGate {
             let fresh = try await awaitAbandoningOnCancel(refresh)
             guard fresh != token else { return false }
             let source = self.source
-            let confirmed = try await awaitAbandoningOnCancel(Task { try await source.refreshed(rejecting: token) })
+            let confirmed = try await awaitAbandoningOnCancel(Task { try await Self.unbudgeted { try await source.refreshed(rejecting: token) } })
             return confirmed != token
         }
         let source = self.source
-        let task = Task { try await source.refreshed(rejecting: token) }
+        let task = Task { try await Self.unbudgeted { try await source.refreshed(rejecting: token) } }
         refresh = task
         return try await awaitAbandoningOnCancel(task) != token
+    }
+
+    /// Run a shared refresh free of the caller's retry policy and deadline:
+    /// other callers join it, so one caller's budget must not cut it short.
+    private static func unbudgeted<T: Sendable>(_ body: @Sendable () async throws -> T) async throws -> T {
+        try await GmailRetryPolicy.$override.withValue(nil) {
+            try await GmailRetryPolicy.$activeDeadline.withValue(nil) { try await body() }
+        }
     }
 }
 
