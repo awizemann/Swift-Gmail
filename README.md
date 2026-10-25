@@ -221,6 +221,12 @@ failures that never reached Gmail. It cannot recognise your own auth error
 (the one your `GmailCredentialErrors` reports), so check for that first: a
 dead credential means nothing was sent.
 
+## 0.3.4
+
+Additive only: `listDrafts` takes an optional `query` (Gmail search syntax,
+e.g. `rfc822msgid:<id>`) and `includeSpamTrash`, so a host can find the
+draft holding a Message-ID in one call.
+
 ## 0.3.3
 
 Additive only: `GmailAPIError.isRateLimit(_:)` also recognises an `.httpError`

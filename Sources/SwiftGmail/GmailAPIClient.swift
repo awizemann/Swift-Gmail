@@ -156,11 +156,22 @@ public final class GmailAPIClient: Sendable {
     /// message resource, so no separate `drafts.get` is needed.
     public func listDrafts(
         accessToken: String,
+        query: String? = nil,
         maxResults: Int = 100,
         pageToken: String? = nil,
+        includeSpamTrash: Bool = false,
         quotaKey: String = GmailQuotaScope.current
     ) async throws -> ListDraftsResponse {
+        // `query` takes the same search syntax as messages.list — e.g.
+        // `rfc822msgid:<id>` finds the draft holding a Message-ID in one call,
+        // which is how a host checks for a draft after a lost create response.
         var queryItems = [URLQueryItem(name: "maxResults", value: String(maxResults))]
+        if let query {
+            queryItems.append(URLQueryItem(name: "q", value: query))
+        }
+        if includeSpamTrash {
+            queryItems.append(URLQueryItem(name: "includeSpamTrash", value: "true"))
+        }
         if let pageToken = pageToken {
             queryItems.append(URLQueryItem(name: "pageToken", value: pageToken))
         }

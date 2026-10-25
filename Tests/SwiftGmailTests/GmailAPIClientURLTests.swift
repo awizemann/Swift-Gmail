@@ -35,3 +35,46 @@ struct GmailAPIClientURLTests {
         #expect(q == "rfc822msgid:CALcfcgCvvhZso+=VKZefteck-wyV1kZ@mail.gmail.com")
     }
 }
+
+@Suite("GmailAPIClient listDrafts query")
+struct GmailAPIClientListDraftsQueryTests {
+
+    final class Captured: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _url: URL?
+        var url: URL? { lock.withLock { _url } }
+        func record(_ url: URL?) { lock.withLock { _url = url } }
+    }
+
+    static func client(capturing captured: Captured) -> GmailAPIClient {
+        GmailAPIClient(quotaBucket: GmailQuotaBucket(), transport: { request in
+            captured.record(request.url)
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (Data(#"{"drafts":[{"id":"r1","message":{"id":"m1","threadId":"t1"}}]}"#.utf8), response)
+        })
+    }
+
+    @Test("query and includeSpamTrash reach drafts.list, with + encoded")
+    func queryIsSent() async throws {
+        let captured = Captured()
+        let response = try await Self.client(capturing: captured).listDrafts(
+            accessToken: "t", query: "rfc822msgid:CAL+x=y@mail.gmail.com", includeSpamTrash: true
+        )
+        #expect(response.drafts?.first?.id == "r1")
+        let url = try #require(captured.url)
+        let raw = try #require(url.query(percentEncoded: true))
+        #expect(!raw.contains("+"))
+        let items = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        #expect(items.first { $0.name == "q" }?.value == "rfc822msgid:CAL+x=y@mail.gmail.com")
+        #expect(items.first { $0.name == "includeSpamTrash" }?.value == "true")
+    }
+
+    @Test("Without a query, drafts.list sends no q and no includeSpamTrash")
+    func noQueryByDefault() async throws {
+        let captured = Captured()
+        _ = try await Self.client(capturing: captured).listDrafts(accessToken: "t")
+        let url = try #require(captured.url)
+        let items = try #require(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        #expect(items.map(\.name) == ["maxResults"])
+    }
+}
