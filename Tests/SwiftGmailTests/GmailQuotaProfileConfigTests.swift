@@ -27,7 +27,7 @@ struct GmailQuotaProfileConfigTests {
             messagesSend: d.messagesSend, attachmentsGet: d.attachmentsGet,
             threadsList: d.threadsList, threadsGet: d.threadsGet, draftsList: d.draftsList,
             draftsCreate: d.draftsCreate, draftsUpdate: d.draftsUpdate, draftsDelete: d.draftsDelete,
-            draftsGet: d.draftsGet, draftsSend: d.draftsSend, labelsCreate: d.labelsCreate
+            draftsGet: d.draftsGet, draftsSend: d.draftsSend, labelsCreate: d.labelsCreate, labelsGet: d.labelsGet
         )
         return GmailQuotaProfile(unitsPerSecond: 10, perUserUnitsPerSecond: 20, unitCost: cost)
     }()

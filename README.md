@@ -235,6 +235,9 @@ dead credential means nothing was sent.
   the draft with its message at that format: `DraftMessage` now has optional
   `snippet`, `historyId`, `internalDate`, `sizeEstimate`, `payload` and `raw`.
   It retries like any read.
+- `getLabel(accessToken:labelId:)` / `getLabel(tokenSource:labelId:)`
+  (`labels.get`, 1 unit) returns one `GmailLabel` with `messagesTotal`,
+  `messagesUnread`, `threadsTotal` and `threadsUnread`. It retries like any read.
 - `createLabel(accessToken:name:labelListVisibility:messageListVisibility:)`
   (`labels.create`, 5 units). A label name is unique, so a create that 5xx'd
   or timed out may already exist: it retries only a 429 or rate-limit 403,
@@ -266,6 +269,17 @@ dot-segment. Gmail's hex ids are unchanged.
 
 `GmailMessage.snippet` decodes as `""` and `MessagePayload.Body.size` as `0`
 when Gmail omits them.
+
+## 0.3.6
+
+Additive and source-compatible: `getLabel(accessToken:labelId:)` and
+`getLabel(tokenSource:labelId:)` (`labels.get`, 1 unit), returning a
+`GmailLabel` with its message and thread counts; it retries like any read.
+New `GmailUnitCost` entry `labelsGet` (1).
+
+`drafts.get` has no `metadataHeaders` parameter in Gmail's API. To fetch
+selected headers for a draft row, call
+`getMessage(messageId: draft.message.id, format: .metadata, metadataHeaders: [...])`.
 
 ## 0.3.5
 

@@ -1159,6 +1159,53 @@ public final class GmailAPIClient: Sendable {
         return try JSONDecoder().decode(DraftResponse.self, from: data)
     }
 
+    /// Fetch one label with its counts (`labels.get`, 1 unit). Idempotent,
+    /// so it retries like any read.
+    public func getLabel(
+        accessToken: String,
+        labelId: String,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> GmailLabel {
+        try await withRetry {
+            try await self.meter(self.unitCost.labelsGet, key: quotaKey)
+            return try await self.labelRequest(accessToken: accessToken, labelId: labelId, quotaKey: quotaKey)
+        }
+    }
+
+    /// The same fetch with the token resolved after the bucket's wait, and a
+    /// 401 given one refresh + re-send.
+    public func getLabel(
+        tokenSource: GmailTokenSource,
+        labelId: String,
+        quotaKey: String = GmailQuotaScope.current
+    ) async throws -> GmailLabel {
+        try await withRetry {
+            try await self.withTokenSource(tokenSource, meter: {
+                try await self.meter(self.unitCost.labelsGet, key: quotaKey)
+            }) { token in
+                try await self.labelRequest(accessToken: token, labelId: labelId, quotaKey: quotaKey)
+            }
+        }
+    }
+
+    /// One unmetered `labels.get` — callers meter first.
+    private func labelRequest(
+        accessToken: String,
+        labelId: String,
+        quotaKey: String
+    ) async throws -> GmailLabel {
+        let url = try self.apiURL("\(self.usersBase)/labels/\(Self.pathSegment(labelId))")
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 30
+
+        let (data, response) = try await self.send(request, quotaKey: quotaKey)
+
+        try self.checkedResponse(response, body: data, call: "labels.get")
+
+        return try JSONDecoder().decode(GmailLabel.self, from: data)
+    }
+
     @discardableResult
     public func updateDraft(
         accessToken: String,

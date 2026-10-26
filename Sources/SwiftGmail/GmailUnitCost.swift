@@ -33,6 +33,7 @@ import Foundation
 /// | ------------------------ | ----- |
 /// | `getProfile`             |     1 |
 /// | `labels.list`            |     1 |
+/// | `labels.get`             |     1 |
 /// | `labels.create`          |     5 |
 /// | `history.list`           |     2 |
 /// | `messages.list`          |     5 |
@@ -83,6 +84,7 @@ public struct GmailUnitCost: Sendable {
     public let draftsGet: Int
     public let draftsSend: Int
     public let labelsCreate: Int
+    public let labelsGet: Int
 
     /// The table above, verbatim. Correct for any project created on or after
     /// 2026-05-01.
@@ -107,7 +109,8 @@ public struct GmailUnitCost: Sendable {
         draftsDelete: 10,
         draftsGet: 5,
         draftsSend: 100,
-        labelsCreate: 5
+        labelsCreate: 5,
+        labelsGet: 1
     )
 
     /// Pre-2026-05-01 projects. The only documented differences are the two
@@ -135,7 +138,8 @@ public struct GmailUnitCost: Sendable {
         draftsDelete: 10,
         draftsGet: 5,
         draftsSend: 100,
-        labelsCreate: 5
+        labelsCreate: 5,
+        labelsGet: 1
     )
 }
 

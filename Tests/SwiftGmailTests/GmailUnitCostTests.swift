@@ -27,6 +27,7 @@ struct GmailUnitCostTests {
         arguments: [
             ("getProfile", GmailUnitCost.documented.getProfile, 1),
             ("labels.list", GmailUnitCost.documented.labelsList, 1),
+            ("labels.get", GmailUnitCost.documented.labelsGet, 1),
             ("labels.create", GmailUnitCost.documented.labelsCreate, 5),
             ("drafts.get", GmailUnitCost.documented.draftsGet, 5),
             ("drafts.send", GmailUnitCost.documented.draftsSend, 100),

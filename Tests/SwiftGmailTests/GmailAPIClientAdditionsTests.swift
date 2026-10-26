@@ -228,7 +228,7 @@ struct GmailAPIClientAdditionsTests {
             messagesSend: 100, attachmentsGet: d.attachmentsGet, threadsList: d.threadsList,
             threadsGet: d.threadsGet, draftsList: d.draftsList, draftsCreate: 10,
             draftsUpdate: d.draftsUpdate, draftsDelete: d.draftsDelete,
-            draftsGet: d.draftsGet, draftsSend: 77, labelsCreate: d.labelsCreate
+            draftsGet: d.draftsGet, draftsSend: 77, labelsCreate: d.labelsCreate, labelsGet: d.labelsGet
         )
         let clock = VirtualClock()
         let start = clock.now
@@ -444,6 +444,80 @@ struct GmailAPIClientAdditionsTests {
             #expect(tokens.refreshCount == 1, "call \(call)")
             #expect(recorder.last.value(forHTTPHeaderField: "Authorization") == "Bearer new")
         }
+    }
+
+    // MARK: - labels.get
+
+    private static let labelOK = """
+        {"id":"Label_12","name":"Receipts","messageListVisibility":"show","labelListVisibility":"labelShow",
+          "type":"user","messagesTotal":1234,"messagesUnread":56,"threadsTotal":789,"threadsUnread":42,
+          "color":{"textColor":"#ffffff","backgroundColor":"#16a765"}}
+        """
+
+    @Test("getLabel GETs labels/{id} with the id encoded as one segment")
+    func getLabelRequest() async throws {
+        let recorder = Recorder([.http(200, Self.labelOK)])
+        _ = try await Self.client(recorder).getLabel(accessToken: "t", labelId: "../x?y")
+        #expect(recorder.last.httpMethod == "GET")
+        #expect(recorder.last.url!.absoluteString == "https://gmail.googleapis.com/gmail/v1/users/me/labels/..%2Fx%3Fy")
+    }
+
+    @Test("getLabel decodes the message and thread counts")
+    func getLabelDecodes() async throws {
+        let recorder = Recorder([.http(200, Self.labelOK)])
+        let label = try await Self.client(recorder).getLabel(accessToken: "t", labelId: "Label_12")
+        #expect(label.id == "Label_12" && label.name == "Receipts")
+        #expect(label.messagesTotal == 1234)
+        #expect(label.messagesUnread == 56)
+        #expect(label.threadsTotal == 789)
+        #expect(label.threadsUnread == 42)
+    }
+
+    @Test("getLabel is idempotent: a 503 is retried")
+    func getLabelRetried() async throws {
+        let recorder = Recorder([.http(503, "{}"), .http(200, Self.labelOK)])
+        let label = try await Self.client(recorder).getLabel(accessToken: "t", labelId: "Label_12")
+        #expect(label.threadsUnread == 42)
+        #expect(recorder.attempts == 2)
+    }
+
+    @Test("getLabel is charged labels.get's units, not labels.list's or drafts.get's")
+    func getLabelCharge() async throws {
+        let d = GmailUnitCost.documented
+        let cost = GmailUnitCost(
+            getProfile: d.getProfile, labelsList: 1, historyList: d.historyList,
+            messagesList: d.messagesList, messagesGet: d.messagesGet, messagesModify: d.messagesModify,
+            messagesTrash: d.messagesTrash, messagesUntrash: d.messagesUntrash,
+            messagesDelete: d.messagesDelete, messagesBatchModify: d.messagesBatchModify,
+            messagesSend: d.messagesSend, attachmentsGet: d.attachmentsGet, threadsList: d.threadsList,
+            threadsGet: d.threadsGet, draftsList: d.draftsList, draftsCreate: d.draftsCreate,
+            draftsUpdate: d.draftsUpdate, draftsDelete: d.draftsDelete,
+            draftsGet: 5, draftsSend: d.draftsSend, labelsCreate: d.labelsCreate, labelsGet: 7
+        )
+        let clock = VirtualClock()
+        let start = clock.now
+        let bucket = GmailQuotaBucket(
+            now: { clock.now }, sleeper: { clock.advance($0) },
+            profile: GmailQuotaProfile(unitsPerSecond: 10, perUserUnitsPerSecond: 10, unitCost: cost)
+        )
+        let recorder = Recorder([.http(200, Self.labelOK)])
+        let client = GmailAPIClient(quotaBucket: bucket, transport: { try recorder.respond(to: $0) })
+        _ = try await client.getLabel(accessToken: "t", labelId: "Label_12", quotaKey: "k")
+        // A fresh bucket's interactive clock moves by units / rate: 7 / 10 u/s.
+        let pushed = try #require(await bucket.buckets["k"]?.nextFreeInteractive)
+        #expect(abs(pushed.timeIntervalSince(start) - 0.7) < 0.001, "charged \(pushed.timeIntervalSince(start) * 10) units")
+        #expect(GmailUnitCost.documented.labelsGet == 1)
+    }
+
+    @Test("getLabel via tokenSource refreshes once on a 401")
+    func getLabelTokenSource() async throws {
+        let tokens = Tokens()
+        let recorder = Recorder([.http(401, "{}"), .http(200, Self.labelOK)])
+        let label = try await Self.client(recorder).getLabel(tokenSource: tokens.source, labelId: "Label_12")
+        #expect(label.messagesUnread == 56)
+        #expect(recorder.attempts == 2)
+        #expect(tokens.refreshCount == 1)
+        #expect(recorder.requests.map { $0.value(forHTTPHeaderField: "Authorization") } == ["Bearer old", "Bearer new"])
     }
 
     @Test("send and createDraft via tokenSource: a timeout is one attempt and no refresh", arguments: [true, false])
